@@ -26,14 +26,14 @@ const BLD = {
 };
 
 const UNIT = {
-  inf:  {len:18, wid:15, name:'步兵'},
-  tank: {len:52, wid:32, name:'坦克'},
-  harv: {len:46, wid:28, name:'采矿车'},
+  inf:  {name:'步兵'},
+  tank: {len:56, wid:34, name:'坦克'},
+  harv: {len:48, wid:30, name:'采矿车'},
 };
 
 const TEAM = [
-  {accent:'#5f9fe0', glow:'#b6d9ff', emblem:'#a9d3ff'},
-  {accent:'#e0644f', glow:'#ffb3a3', emblem:'#ffc0b0'},
+  {accent:'#5f9fe0', glow:'#b6d9ff', emblem:'#a9d3ff', body:'#4a7bb0'},
+  {accent:'#e0644f', glow:'#ffb3a3', emblem:'#ffc0b0', body:'#a8544a'},
 ];
 
 /* ---------------- 小工具 ---------------- */
@@ -52,6 +52,7 @@ function poly(c, pts, fill){
   if(fill){ c.fillStyle = fill; c.fill(); }
 }
 const lerpP = (a,b,t)=> [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t];
+const midP  = (a,b)=> [(a[0]+b[0])/2, (a[1]+b[1])/2];
 function rr(c, x, y, w, h, r){
   c.beginPath();
   c.moveTo(x+r,y);
@@ -61,7 +62,6 @@ function rr(c, x, y, w, h, r){
   c.arcTo(x,y,x+w,y,r);
   c.closePath();
 }
-/* 一层很轻的颗粒，避免大面积纯色看着像色卡 */
 function grain(o, amp){
   const {c, w, h} = o;
   const img = c.getImageData(0,0,w*SS,h*SS);
@@ -74,11 +74,18 @@ function grain(o, amp){
   }
   c.putImageData(img,0,0);
 }
+function lighten(hex, k){
+  const n = parseInt(hex.slice(1),16);
+  let r = (n>>16)&255, g = (n>>8)&255, b = n&255;
+  const f = k<0 ? 0 : 255;
+  r = Math.round(r + (f-r)*k); g = Math.round(g + (f-g)*k); b = Math.round(b + (f-b)*k);
+  return `rgb(${r},${g},${b})`;
+}
 
 /* =========================================================================
    建筑
    ========================================================================= */
-function softShadow(c, pts, times){
+function softShadow(c, pts){
   for(let i=3;i>=1;i--){
     const o = i*2;
     poly(c, pts.map(p=>[p[0]+o, p[1]+o*1.3]), `rgba(0,0,0,${.055})`);
@@ -104,19 +111,17 @@ function bakeBuilding(type, owner){
 
   softShadow(c, [A,B,C,D]);
 
-  /* ---- 墙体 ---- */
-  // 左墙（C-D 面）受光
+  /* ---- 墙体：左墙受光，右墙背光 ---- */
   const gLeft = c.createLinearGradient(0, C[1]-d.H, 0, C[1]);
   gLeft.addColorStop(0, lighten(d.wall, .22));
   gLeft.addColorStop(1, lighten(d.wall, -.10));
   poly(c, [C, D, up(D,d.H), up(C,d.H)], gLeft);
-  // 右墙（B-C 面）背光
+
   const gRight = c.createLinearGradient(0, C[1]-d.H, 0, C[1]);
   gRight.addColorStop(0, lighten(d.wall, .04));
   gRight.addColorStop(1, lighten(d.wall, -.30));
   poly(c, [B, C, up(C,d.H), up(B,d.H)], gRight);
 
-  /* ---- 墙上的窗/条带 ---- */
   wallBands(c, B, C, d.H, lighten(d.wall, -.18));
   wallBands(c, D, C, d.H, lighten(d.wall, -.06));
 
@@ -126,13 +131,12 @@ function bakeBuilding(type, owner){
   gRoof.addColorStop(1, lighten(d.roof, -.16));
   poly(c, [up(A,d.H), up(B,d.H), up(C,d.H), up(D,d.H)], gRoof);
 
-  // 屋顶内圈（往里缩一点，做出"女儿墙"的感觉）
+  // 屋顶内圈（女儿墙）
   const inset = 0.16;
-  const mid = (a,b)=> [(a[0]+b[0])/2, (a[1]+b[1])/2];
-  const rA = up(mid(lerpP(A,B,inset), lerpP(A,D,inset)), d.H);
-  const rB = up(mid(lerpP(B,A,inset), lerpP(B,C,inset)), d.H);
-  const rC = up(mid(lerpP(C,B,inset), lerpP(C,D,inset)), d.H);
-  const rD = up(mid(lerpP(D,A,inset), lerpP(D,C,inset)), d.H);
+  const rA = up(midP(lerpP(A,B,inset), lerpP(A,D,inset)), d.H);
+  const rB = up(midP(lerpP(B,A,inset), lerpP(B,C,inset)), d.H);
+  const rC = up(midP(lerpP(C,B,inset), lerpP(C,D,inset)), d.H);
+  const rD = up(midP(lerpP(D,A,inset), lerpP(D,C,inset)), d.H);
   poly(c, [rA,rB,rC,rD], null);
   c.strokeStyle = 'rgba(0,0,0,.16)'; c.lineWidth = 1.4; c.stroke();
 
@@ -153,22 +157,13 @@ function bakeBuilding(type, owner){
   poly(c, [e0,e1,e2,e3], TEAM[owner].accent);
 
   /* ---- 各类建筑的特征件 ---- */
-  if(type === 'yard')  yardExtra(c, d, X, Y, up, B, C, owner);
+  if(type === 'yard')     yardExtra(c, d, X, Y, up, B, C, owner);
   if(type === 'barracks') barrackExtra(c, d, X, Y, up, B, C, D, owner);
   if(type === 'refinery') refineryExtra(c, d, X, Y, up, owner);
-  if(type === 'power') powerExtra(c, d, X, Y, up, owner);
+  if(type === 'power')    powerExtra(c, d, X, Y, up, owner);
 
   grain(o, 10);
-
   return { img:o.cv, ax:X(d.w/2,d.h/2), ay:Y(d.w/2,d.h/2), w:W, h:H };
-}
-
-function lighten(hex, k){
-  const n = parseInt(hex.slice(1),16);
-  let r = (n>>16)&255, g = (n>>8)&255, b = n&255;
-  const f = k<0 ? 0 : 255;
-  r = Math.round(r + (f-r)*k); g = Math.round(g + (f-g)*k); b = Math.round(b + (f-b)*k);
-  return `rgb(${r},${g},${b})`;
 }
 
 /* 墙面上沿墙方向的可重复窗带 */
@@ -183,14 +178,13 @@ function wallBands(c, p0, p1, H, color){
       [b[0], b[1]-y1], [a[0], a[1]-y1],
     ], 'rgba(20,26,26,.42)');
   }
-  // 底部压条
   poly(c, [
     [p0[0], p0[1]-H*0.10], [p1[0], p1[1]-H*0.10],
     [p1[0], p1[1]], [p0[0], p0[1]]
   ], color);
 }
 
-/* 屋顶上一个小的长方体（空调箱/电梯间） */
+/* 屋顶上一个小长方体（设备箱） */
 function roofBox(c, X, Y, up, gx, gy, w, h, hh, fill){
   const A=[X(gx,gy),Y(gx,gy)], B=[X(gx+w,gy),Y(gx+w,gy)];
   const C=[X(gx+w,gy+h),Y(gx+w,gy+h)], D=[X(gx,gy+h),Y(gx,gy+h)];
@@ -206,7 +200,6 @@ function yardExtra(c, d, X, Y, up, B, C, owner){
     [a[0], a[1]], [b[0], b[1]],
     [b[0], b[1]-d.H*0.62], [a[0], a[1]-d.H*0.62],
   ], '#242e36');
-  // 门内横向肋条
   c.strokeStyle = 'rgba(255,255,255,.10)';
   c.lineWidth = 1;
   for(let i=1;i<4;i++){
@@ -226,7 +219,6 @@ function yardExtra(c, d, X, Y, up, B, C, owner){
 }
 
 function barrackExtra(c, d, X, Y, up, B, C, D, owner){
-  // 门
   const a = up(lerpP(B,C,.30), 0), b = up(lerpP(B,C,.62), 0);
   poly(c, [
     [a[0], a[1]], [b[0], b[1]],
@@ -237,7 +229,7 @@ function barrackExtra(c, d, X, Y, up, B, C, D, owner){
   c.strokeStyle = '#b9b2a0'; c.lineWidth = 2;
   c.beginPath(); c.moveTo(fx, fy-d.H); c.lineTo(fx, fy-d.H-22); c.stroke();
   poly(c, [[fx, fy-d.H-22],[fx+13, fy-d.H-18],[fx, fy-d.H-13]], TEAM[owner].accent);
-  // 沙袋（沿左前缘）
+  // 沙袋
   for(let i=0;i<4;i++){
     const p = up(lerpP(D,C,.15+i*.19), 0);
     c.fillStyle = '#8a7d5c';
@@ -247,11 +239,9 @@ function barrackExtra(c, d, X, Y, up, B, C, D, owner){
 }
 
 function refineryExtra(c, d, X, Y, up, owner){
-  // 两个储罐
-  [[0.28,0.26],[0.66,0.30]].forEach(([gx,gy],i)=>{
+  [[0.28,0.26],[0.66,0.30]].forEach(([gx,gy])=>{
     const cx = X(d.w*gx, d.h*gy), cy = Y(d.w*gx, d.h*gy);
     const rw = 17, hh = d.H*0.85;
-    // 罐体
     const g = c.createLinearGradient(cx-rw, 0, cx+rw, 0);
     g.addColorStop(0, '#8d9a96'); g.addColorStop(.45, '#c3cecb'); g.addColorStop(1, '#6d7b78');
     c.fillStyle = g;
@@ -260,18 +250,15 @@ function refineryExtra(c, d, X, Y, up, owner){
     c.lineTo(cx+rw, cy);
     c.ellipse(cx, cy, rw, rw*0.5, 0, 0, Math.PI);
     c.closePath(); c.fill();
-    // 顶盖
     c.fillStyle = '#d7e0dd';
     c.beginPath(); c.ellipse(cx, cy-hh, rw, rw*0.5, 0, 0, 7); c.fill();
     c.strokeStyle = 'rgba(0,0,0,.18)'; c.lineWidth = 1; c.stroke();
-    // 环箍
     c.strokeStyle = 'rgba(0,0,0,.12)';
     for(let k=1;k<3;k++){
       const y = cy - hh*(1-k/3);
       c.beginPath(); c.ellipse(cx, y, rw, rw*0.5, 0, 0, Math.PI); c.stroke();
     }
   });
-  // 连接管
   const p1 = [X(d.w*.28, d.h*.26), Y(d.w*.28, d.h*.26)];
   const p2 = [X(d.w*.66, d.h*.30), Y(d.w*.66, d.h*.30)];
   c.strokeStyle = '#93a09c'; c.lineWidth = 5;
@@ -279,7 +266,6 @@ function refineryExtra(c, d, X, Y, up, owner){
 }
 
 function powerExtra(c, d, X, Y, up, owner){
-  // 冷却塔
   const cx = X(d.w*.5, d.h*.5), cy = Y(d.w*.5, d.h*.5);
   const rwTop = 15, rwBot = 21, hh = d.H + 20;
   const g = c.createLinearGradient(cx-rwBot, 0, cx+rwBot, 0);
@@ -294,82 +280,121 @@ function powerExtra(c, d, X, Y, up, owner){
   c.beginPath(); c.ellipse(cx, cy-hh, rwTop, rwTop*0.5, 0, 0, 7); c.fill();
   c.fillStyle = 'rgba(30,40,50,.45)';
   c.beginPath(); c.ellipse(cx, cy-hh, rwTop*.62, rwTop*.31, 0, 0, 7); c.fill();
-  // 电缆
   c.strokeStyle = 'rgba(30,36,30,.7)'; c.lineWidth = 1.6;
   c.beginPath(); c.moveTo(cx+rwBot*.7, cy-4); c.lineTo(X(d.w*.92, d.h*.9), Y(d.w*.92, d.h*.9)-4); c.stroke();
 }
 
 /* =========================================================================
-   单位：先按"俯视"画，再压扁 0.5 并旋转 —— 得到等距的立体感
+   单位
+   -------------------------------------------------------------------------
+   载具（坦克/采矿车）：按"俯视"画，再压扁 0.5 并旋转 —— 等距立体感。
+     为了不显得像纸片，分多层烘焙：侧壁（深色剪影，往下偏移）→ 顶面。
+   步兵：不用压扁，直接画"竖立的小人"，像红警里的立绘。
    ========================================================================= */
 function bakeUnit(type, owner, dir){
-  const u = UNIT[type];
-  const pad = 10;
-  const W = u.len + pad*2, H = u.wid*0.5 + pad*2 + 8;
-  const o = mk(W,H), c = o.c;
-  const cx = W/2, cy = H - pad - 6;
+  if(type === 'inf') return bakeInf(owner, dir);
 
-  c.save();
-  c.translate(cx, cy);
-  c.scale(1, 0.5);
-  c.rotate(dir/DIRS*Math.PI*2);
-  if(type === 'tank') tankArt(c, u, owner);
-  else if(type === 'harv') harvArt(c, u, owner);
-  else infArt(c, u, owner);
-  c.restore();
+  const u = UNIT[type];
+  const pad = 14;
+  const W = u.len + pad*2, H = u.wid*0.5 + pad*2 + 20;
+  const o = mk(W,H), c = o.c;
+  const cx = W/2, cy = H - pad - 8;
+  const a = dir/DIRS*Math.PI*2;
+
+  const pass = (dy, fn)=>{
+    c.save();
+    c.translate(cx, cy+dy);
+    c.scale(1, 0.5);
+    c.rotate(a);
+    fn();
+    c.restore();
+  };
+
+  if(type === 'tank'){
+    pass(6, ()=> tankBase(c, u));          // 履带+车体侧壁
+    pass(3, ()=> tankHull(c, u, owner));   // 车体顶
+    pass(7, ()=> tankTurret(c, u, owner, true));  // 炮塔侧壁
+    pass(1, ()=> tankTurret(c, u, owner, false)); // 炮塔顶
+  } else {
+    pass(5, ()=> harvBase(c, u));
+    pass(2, ()=> harvTop(c, u, owner));
+  }
 
   grain(o, 7);
   return { img:o.cv, ax:cx, ay:cy, w:W, h:H };
 }
 
-function tankArt(c, u, owner){
+/* --- 坦克 --- */
+function tankBase(c, u){
   const L = u.len, Wd = u.wid;
-  const A = TEAM[owner];
-  // 履带
-  c.fillStyle = '#22251f';
-  rr(c, -L*.46, -Wd*.46, L*.92, Wd*.26, 3); c.fill();
-  rr(c, -L*.46,  Wd*.20, L*.92, Wd*.26, 3); c.fill();
-  // 履带齿
-  c.fillStyle = 'rgba(255,255,255,.07)';
-  for(let i=0;i<7;i++){
-    const x = -L*.44 + i*L*.13;
-    c.fillRect(x, -Wd*.45, 3, Wd*.24);
-    c.fillRect(x,  Wd*.21, 3, Wd*.24);
-  }
-  // 车体
-  const g = c.createLinearGradient(0,-Wd*.32,0,Wd*.32);
-  g.addColorStop(0, '#7a8261'); g.addColorStop(.5, '#5f684d'); g.addColorStop(1, '#464d39');
+  c.fillStyle = '#262a20';
+  rr(c, -L*.46, -Wd*.48, L*.92, Wd*.28, 3); c.fill();
+  rr(c, -L*.46,  Wd*.20, L*.92, Wd*.28, 3); c.fill();
+  c.fillStyle = '#454c37';
+  rr(c, -L*.46, -Wd*.32, L*.92, Wd*.64, 4); c.fill();
+}
+function tankHull(c, u, owner){
+  const L = u.len, Wd = u.wid;
+  const g = c.createLinearGradient(0,-Wd*.3,0,Wd*.3);
+  g.addColorStop(0, '#94a06e'); g.addColorStop(.5, '#79825a'); g.addColorStop(1, '#5c6544');
   c.fillStyle = g;
   rr(c, -L*.44, -Wd*.28, L*.86, Wd*.56, 4); c.fill();
-  c.strokeStyle = 'rgba(0,0,0,.35)'; c.lineWidth = 1; c.stroke();
+  // 顶面高光边
+  c.strokeStyle = 'rgba(230,240,190,.4)'; c.lineWidth = 1.4;
+  c.beginPath();
+  c.moveTo(-L*.40, -Wd*.26); c.lineTo(L*.38, -Wd*.26);
+  c.stroke();
+  c.strokeStyle = 'rgba(0,0,0,.4)'; c.lineWidth = 1;
+  rr(c, -L*.44, -Wd*.28, L*.86, Wd*.56, 4); c.stroke();
+  // 履带齿
+  c.fillStyle = 'rgba(255,255,255,.08)';
+  for(let i=0;i<7;i++){
+    const x = -L*.42 + i*L*.125;
+    c.fillRect(x, -Wd*.47, 3, Wd*.26);
+    c.fillRect(x,  Wd*.21, 3, Wd*.26);
+  }
   // 阵营色条
-  c.fillStyle = A.accent;
-  c.fillRect(-L*.10, -Wd*.26, L*.16, Wd*.52);
-  // 炮塔
-  c.fillStyle = '#525a41';
+  c.fillStyle = TEAM[owner].accent;
+  c.fillRect(-L*.12, -Wd*.26, L*.14, Wd*.52);
+}
+function tankTurret(c, u, owner, dark){
+  const L = u.len, Wd = u.wid;
+  if(dark){
+    c.fillStyle = '#3a4130';
+    c.beginPath(); c.arc(-L*.02, 0, Wd*.32, 0, 7); c.fill();
+    c.fillRect(L*.02, -3, L*.40, 6);
+    return;
+  }
+  c.fillStyle = '#707b52';
   c.beginPath(); c.arc(-L*.02, 0, Wd*.30, 0, 7); c.fill();
-  c.strokeStyle = 'rgba(0,0,0,.35)'; c.stroke();
-  c.fillStyle = '#3c4333';
-  c.fillRect(L*.02, -2.6, L*.38, 5.2);
-  c.fillStyle = '#20241c';
-  c.fillRect(L*.34, -3.4, 5, 6.8);
-  // 舱盖
-  c.fillStyle = '#6f7857';
-  c.beginPath(); c.arc(-L*.12, -Wd*.06, 4.4, 0, 7); c.fill();
-  c.fillStyle = A.emblem;
-  c.beginPath(); c.arc(-L*.12, -Wd*.06, 1.8, 0, 7); c.fill();
+  c.strokeStyle = 'rgba(0,0,0,.4)'; c.lineWidth = 1; c.stroke();
+  c.strokeStyle = 'rgba(235,245,200,.35)';
+  c.beginPath(); c.arc(-L*.02, 0, Wd*.24, Math.PI*.9, Math.PI*1.9); c.stroke();
+  c.fillStyle = '#4c553c';
+  c.fillRect(L*.02, -2.6, L*.40, 5.2);
+  c.fillStyle = '#23271d';
+  c.fillRect(L*.36, -3.4, 5, 6.8);
+  c.fillStyle = '#87926a';
+  c.beginPath(); c.arc(-L*.12, -Wd*.07, 4.6, 0, 7); c.fill();
+  c.fillStyle = TEAM[owner].emblem;
+  c.beginPath(); c.arc(-L*.12, -Wd*.07, 1.9, 0, 7); c.fill();
 }
 
-function harvArt(c, u, owner){
+/* --- 采矿车 --- */
+function harvBase(c, u){
+  const L = u.len, Wd = u.wid;
+  c.fillStyle = '#1f211c';
+  [[-L*.30,-Wd*.46],[-L*.30,Wd*.30],[ L*.24,-Wd*.46],[L*.24,Wd*.30]].forEach(([x,y])=>{
+    rr(c, x, y, L*.18, Wd*.16, 2); c.fill();
+  });
+  c.fillStyle = '#4c422a';
+  rr(c, -L*.48, -Wd*.36, L*.64, Wd*.72, 3); c.fill();
+}
+function harvTop(c, u, owner){
   const L = u.len, Wd = u.wid;
   const A = TEAM[owner];
-  // 轮
-  c.fillStyle = '#1f211c';
-  [[-L*.30,-Wd*.44],[-L*.30,Wd*.30],[ L*.26,-Wd*.44],[L*.26,Wd*.30]].forEach(([x,y])=>{
-    rr(c, x, y, L*.18, Wd*.15, 2); c.fill();
-  });
   // 料斗
-  c.fillStyle = '#7c6a3f';
+  c.fillStyle = '#6f5f38';
   rr(c, -L*.46, -Wd*.34, L*.62, Wd*.68, 3); c.fill();
   c.strokeStyle = 'rgba(0,0,0,.35)'; c.lineWidth = 1; c.stroke();
   // 矿石
@@ -383,28 +408,56 @@ function harvArt(c, u, owner){
   }
   // 驾驶室
   c.fillStyle = A.accent;
-  rr(c, L*.20, -Wd*.30, L*.24, Wd*.60, 3); c.fill();
+  rr(c, L*.18, -Wd*.30, L*.26, Wd*.60, 3); c.fill();
   c.fillStyle = 'rgba(180,225,255,.75)';
-  rr(c, L*.24, -Wd*.22, L*.14, Wd*.44, 2); c.fill();
+  rr(c, L*.22, -Wd*.22, L*.15, Wd*.44, 2); c.fill();
   c.fillStyle = '#3d4436';
-  c.fillRect(L*.42, -2.4, 4, 4.8);
+  c.fillRect(L*.44, -2.4, 4, 4.8);
 }
 
-function infArt(c, u, owner){
+/* --- 步兵：竖立小人，两个朝向 --- */
+function bakeInf(owner, dir){
+  const o = mk(26, 36), c = o.c;
+  const cx = 13, base = 31;
   const A = TEAM[owner];
-  // 背包
-  c.fillStyle = '#4d5240';
-  rr(c, -8, -5, 5, 10, 2); c.fill();
+  const flip = dir >= 8;             // 屏幕上朝左还是朝右
+  c.save();
+  c.translate(cx, base);
+  if(flip) c.scale(-1, 1);
+
+  // 腿
+  c.strokeStyle = '#3a3f30'; c.lineWidth = 2.6;
+  c.beginPath(); c.moveTo(-1.5, -8); c.lineTo(-2.5, -1); c.stroke();
+  c.beginPath(); c.moveTo(2.5, -8);  c.lineTo(3.5, -1);  c.stroke();
+  // 靴子
+  c.fillStyle = '#23261e';
+  c.fillRect(-4.5, -2, 4, 2.4); c.fillRect(1.5, -2, 4, 2.4);
   // 身体
-  c.fillStyle = owner ? '#a8544a' : '#4a7bb0';
-  c.beginPath(); c.ellipse(0, 0, 6, 5.4, 0, 0, 7); c.fill();
+  const g = c.createLinearGradient(0,-16,0,-7);
+  g.addColorStop(0, lighten(A.body, .18));
+  g.addColorStop(1, lighten(A.body, -.18));
+  c.fillStyle = g;
+  rr(c, -4.5, -16.5, 9, 10, 3); c.fill();
   c.strokeStyle = 'rgba(0,0,0,.4)'; c.lineWidth = 1; c.stroke();
+  // 背带
+  c.strokeStyle = 'rgba(0,0,0,.3)'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(-2, -16); c.lineTo(1, -8); c.stroke();
+  // 头
+  c.fillStyle = '#c9a382';
+  c.beginPath(); c.arc(0, -19.5, 3.2, 0, 7); c.fill();
   // 头盔
-  c.fillStyle = A.glow;
-  c.beginPath(); c.arc(1.4, 0, 3.4, 0, 7); c.fill();
+  c.fillStyle = lighten(A.body, -.05);
+  c.beginPath(); c.arc(0, -20, 3.6, Math.PI*1.05, Math.PI*2.1); c.fill();
+  c.beginPath(); c.ellipse(0, -19.4, 4, 1.4, 0, 0, 7); c.fill();
   // 枪
-  c.strokeStyle = '#26291f'; c.lineWidth = 1.8;
-  c.beginPath(); c.moveTo(2, 3.2); c.lineTo(11, 1.6); c.stroke();
+  c.strokeStyle = '#26291f'; c.lineWidth = 2;
+  c.beginPath(); c.moveTo(1, -11); c.lineTo(9.5, -8.5); c.stroke();
+  c.strokeStyle = '#4a4f3f'; c.lineWidth = 1;
+  c.beginPath(); c.moveTo(4, -10.5); c.lineTo(5.5, -12.5); c.stroke();
+
+  c.restore();
+  grain(o, 6);
+  return { img:o.cv, ax:cx, ay:base, w:26, h:36 };
 }
 
 /* =========================================================================
@@ -413,10 +466,8 @@ function infArt(c, u, owner){
 function bakeTree(v){
   const o = mk(52, 66), c = o.c;
   const cx = 26, base = 58;
-  // 杆
   c.fillStyle = '#4a3b28';
   c.fillRect(cx-2.5, base-16, 5, 16);
-  // 冠：三团，左上受光
   const blobs = [
     [cx,      base-34, 16.5, '#3f5c33'],
     [cx-7+v,  base-40, 12.5, '#4c6d3b'],
@@ -426,10 +477,8 @@ function bakeTree(v){
     c.fillStyle = col;
     c.beginPath(); c.ellipse(x, y, r, r*0.82, 0, 0, 7); c.fill();
   }
-  // 受光面
   c.fillStyle = 'rgba(150,190,110,.35)';
   c.beginPath(); c.ellipse(cx-8, base-44, 7, 5, -.3, 0, 7); c.fill();
-  // 影子
   c.fillStyle = 'rgba(0,0,0,.22)';
   c.beginPath(); c.ellipse(cx+4, base+2, 15, 6, 0, 0, 7); c.fill();
   grain(o, 14);
@@ -441,7 +490,6 @@ function bakeRock(v){
   const cx = 22, base = 32;
   c.fillStyle = 'rgba(0,0,0,.22)';
   c.beginPath(); c.ellipse(cx+2, base, 14, 5.5, 0, 0, 7); c.fill();
-  // 石块
   const pts = [[cx-13,base],[cx-9,base-11],[cx+1,base-16],[cx+10,base-9],[cx+13,base]];
   poly(c, pts, '#6d6f66');
   poly(c, [[cx-9,base-11],[cx+1,base-16],[cx+3,base-8],[cx-6,base-6]], '#8b8d82');
@@ -452,9 +500,7 @@ function bakeRock(v){
 
 function bakeOre(v){
   const o = mk(64, 36), c = o.c;
-  // 矿地面：略深的土色菱形
   poly(c, [[32,2],[62,18],[32,34],[2,18]], 'rgba(70,58,34,.55)');
-  // 晶体
   const seeds = [[18,20,6],[30,24,8],[44,18,6],[36,13,5],[24,14,4]];
   for(let i=0;i<seeds.length;i++){
     const [x,y,r] = seeds[(i+v)%seeds.length];
@@ -474,7 +520,10 @@ function build(){
   for(const t of Object.keys(BLD)){
     cache.bld[t] = [ bakeBuilding(t,0), bakeBuilding(t,1) ];
   }
-  for(const t of Object.keys(UNIT)){
+  cache.unit.inf = [ [], [] ];
+  for(let owner=0; owner<2; owner++)
+    for(let d=0; d<DIRS; d++) cache.unit.inf[owner].push(bakeInf(owner, d));
+  for(const t of ['tank','harv']){
     cache.unit[t] = [ [], [] ];
     for(let owner=0; owner<2; owner++)
       for(let d=0; d<DIRS; d++) cache.unit[t][owner].push(bakeUnit(t, owner, d));

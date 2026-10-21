@@ -282,9 +282,10 @@ function drawUnit(u){
   const s = w2s(x, y, 0);
   const z = cam.z;
 
+  const sr = (u.type === 'inf' ? 7 : 12) * z;
   ctx.fillStyle = 'rgba(0,0,0,.26)';
   ctx.beginPath();
-  ctx.ellipse(s.x, s.y, 12*z, 5.5*z, 0, 0, 7);
+  ctx.ellipse(s.x, s.y, sr, sr*.46, 0, 0, 7);
   ctx.fill();
 
   const sp = ART.unit(u.type, u.owner, spriteAngle(u.face));
