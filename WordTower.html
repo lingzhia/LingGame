@@ -749,6 +749,7 @@ function newGame(){
     aiSpawnLeft:0, aiSpawnGap:0, aiSpawnQueue:[],   // 电脑派下来的进攻部队（上半场）
     kills:0, merit:0, meritNeed:21, leaks:0, aiLeaks:0,
     aduShield:0,            // 无敌计时
+    aduHurtM:0, aduHurtE:0, // 主公挨打的红色闪烁计时（只是表现，不影响规则）
     passive:{},             // 被动道具
     actives:[],             // 主动道具槽
     shovelBonus:0,
@@ -1326,8 +1327,9 @@ function startWave(early){
   if (G.ai.passive.luoyang) G.ai.hand.push({ kind:'shovel' });
   const n = G.wave;
   const lv = waveTier(n);
-  // 每批的兵力：8、9、10……（7 + 波次），每批固定间隔 WAVE_GAP 秒
-  const count = 7 + n;
+  // 每批的兵力：3 + 2×波次 → 第 1 波 5 个、第 2 波 7 个、第 3 波 9 个……
+  // （原来是 7+n：第 1 波就是 8 个，开局 5 个 1 阶守军怎么摆都守不住）
+  const count = 3 + 2*n;
   // 批内出兵间隔：上下半场用同一条曲线，铺得均匀一点
   const gap = spawnGapOf(n);
 
@@ -1680,17 +1682,20 @@ function killDefender(mine, idx){
 }
 function killMyUnit(idx){ killDefender(true, idx); }
 
+/* 主公挨打：一个兵换一滴血 —— 兵走到主公那一格就当场阵亡（updateMarchers 里先移除），
+   主公这边固定掉 1 命、补 3 馒头。没有无敌帧：3 个兵同时到就是掉 3 命。
+   神兵符期间兵照样死，只是主公不掉血。 */
 function hitAdu(side){
-  if (side === 'my'){
-    if (G.aduShield > 0) return;                 // 神兵符只保我方主公
-    G.myLife--; G.leaks++; sfx('lost');
+  const mine = side === 'my';
+  if (mine ? G.aduShield > 0 : G.aiShield > 0) return;
+  if (mine){
+    G.myLife--; G.leaks++; G.aduHurtM = 0.45; sfx('lost');
     burst(ADU_M.x, ADU_M.y, 30, SEAL);
     G.mantou += 3;                               // 主公每掉 1 命补 3 馒头（双方同规则）
-    floater(ADU_M.x, ADU_M.y - 58, '主公受伤 +3 馒头', GOLD);
+    floater(ADU_M.x, ADU_M.y - 58, '主公 −1 命 · +3 馒头', GOLD);
     if (G.myLife <= 0) endGame(false);
   } else {
-    if (G.aiShield > 0) return;                 // 电脑的神兵符
-    G.enLife--; G.aiLeaks++; sfx('hero');
+    G.enLife--; G.aiLeaks++; G.aduHurtE = 0.45; sfx('hero');
     burst(ADU_E.x, ADU_E.y, 30, GOLD);
     aiGain(3, ADU_E.x, ADU_E.y + 46);            // 电脑的主公挨打同样补 3 馒头
     if (G.enLife <= 0) endGame(true);
@@ -3435,6 +3440,16 @@ function drawAdu(pos, life, max, mine){
     }
     ctx.restore();
   }
+
+  // 挨打：整枚印闪一下红 —— 一个兵换一滴血，这一下要看得见
+  const hurt = mine ? (G.aduHurtM || 0) : (G.aduHurtE || 0);
+  if (hurt > 0){
+    ctx.save();
+    ctx.globalAlpha = clamp(hurt / 0.45, 0, 1) * 0.5;
+    ctx.fillStyle = '#d8342a';
+    rr(ctx, L, T, S, S, 13); ctx.fill();
+    ctx.restore();
+  }
 }
 
 function drawHandAndButtons(){
@@ -4196,6 +4211,8 @@ function loop(ts){
   step(dt);
   if (G.toastT > 0) G.toastT -= dt;
   if (G.aduShield > 0) G.aduShield -= dt;
+  if (G.aduHurtM > 0) G.aduHurtM -= dt;
+  if (G.aduHurtE > 0) G.aduHurtE -= dt;
   draw();
   requestAnimationFrame(loop);
 }
