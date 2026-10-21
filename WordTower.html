@@ -346,8 +346,10 @@ const TIER = [
 ];
 const MAX_TIER = 5;
 // 名将按自己的曲线成长（上限 5 阶）：血量/攻击更平缓，攻速一样随阶提升
-const heroHpMul  = lv => 1 + 0.52*(lv-1);
-const heroAtkMul = lv => 1 + 0.62*(lv-1);
+/* 名将成长（原 0.52/0.62：5 阶 = 2.6 倍血 3.5 倍攻，加上大招等于一个人清全场，超标）
+   现在每阶 +35% 血 / +42% 攻，5 阶 = 2.4 倍血 2.68 倍攻 —— 仍是最强单位，但扛不住全场围殴 */
+const heroHpMul  = lv => 1 + 0.35*(lv-1);
+const heroAtkMul = lv => 1 + 0.42*(lv-1);
 const heroRateMul= lv => 1 + 0.14*(lv-1);
 
 /* ---------------- 基础兵种：四类兵的攻速 / 攻击力 / 射程各不相同 ---------------- */
@@ -402,18 +404,18 @@ function fuseKey(a, b){
 
 /* ---------------- 12 名将 ---------------- */
 const HEROES = {
-  '赵云': { a:'赵', b:'云', r:'gold',   skill:'longdan',  cd:9.0,  hp:540, atk:60, rate:1.15, range:230,
-            sk:'龙胆', skDesc:'长枪贯穿全场，重创所有敌军' },
-  '关羽': { a:'关', b:'羽', r:'gold',   skill:'wusheng',  cd:7.5,  hp:590, atk:67, rate:1.00, range:186,
+  '赵云': { a:'赵', b:'云', r:'gold',   skill:'longdan',  cd:11.0, hp:540, atk:60, rate:1.15, range:230,
+            sk:'龙胆', skDesc:'长枪贯穿一条直线，重创这一路的敌军' },
+  '关羽': { a:'关', b:'羽', r:'gold',   skill:'wusheng',  cd:9.5,  hp:590, atk:67, rate:1.00, range:186,
             sk:'武圣', skDesc:'跳斩敌军最密处，大范围重伤' },
-  '张飞': { a:'张', b:'飞', r:'gold',   skill:'dangyang', cd:10.0, hp:650, atk:39, rate:0.85, range:166,
-            sk:'当阳桥', skDesc:'一声怒吼，全场敌军眩晕 3 秒' },
-  '刘备': { a:'刘', b:'备', r:'gold',   skill:'rende',    cd:11.0, hp:550, atk:30, rate:0.95, range:250,
-            sk:'仁德', skDesc:'全队回血 35%，并灼烧全场敌军' },
-  '黄忠': { a:'黄', b:'忠', r:'gold',   skill:'liegong',  cd:9.5,  hp:450, atk:69, rate:0.85, range:400,
-            sk:'烈弓', skDesc:'全屏箭雨连射 3 秒' },
-  '马超': { a:'马', b:'超', r:'gold',   skill:'tieqi',    cd:8.0,  hp:560, atk:48, rate:1.30, range:172,
-            sk:'铁骑', skDesc:'铁骑踏阵，全场敌军减速并受伤' },
+  '张飞': { a:'张', b:'飞', r:'gold',   skill:'dangyang', cd:12.0, hp:650, atk:39, rate:0.85, range:166,
+            sk:'当阳桥', skDesc:'一声怒吼，震晕敌军中路的兵 2.2 秒' },
+  '刘备': { a:'刘', b:'备', r:'gold',   skill:'rende',    cd:13.0, hp:550, atk:30, rate:0.95, range:250,
+            sk:'仁德', skDesc:'全队回血 25%，灼烧敌军中路的兵' },
+  '黄忠': { a:'黄', b:'忠', r:'gold',   skill:'liegong',  cd:11.5, hp:450, atk:69, rate:0.85, range:400,
+            sk:'烈弓', skDesc:'箭雨覆盖敌军中路 2.2 秒' },
+  '马超': { a:'马', b:'超', r:'gold',   skill:'tieqi',    cd:10.0, hp:560, atk:48, rate:1.30, range:172,
+            sk:'铁骑', skDesc:'铁骑踏阵，敌军中路的兵减速并受伤' },
   '关兴': { a:'关', b:'兴', r:'purple', hp:375, atk:39, rate:1.15, range:180 },
   '关平': { a:'关', b:'平', r:'purple', hp:340, atk:44, rate:1.05, range:180 },
   '张苞': { a:'张', b:'苞', r:'purple', hp:425, atk:35, rate:1.05, range:172 },
@@ -1829,14 +1831,20 @@ function castHeroSkill(u, mine){
   const A = u.atk * S.atkMul;
   const foes = marchersOf(S.foe);              // 大招永远砸对面阵营的行军兵
   const tag = mine ? '' : '敌方';
-  // 对面半场的中心：范围技的圆心、以及「一个目标都没找到」时的落点都用它
-  const foeMidX = BX + COLS*CELL/2;
-  const foeMidY = mine ? (Y_ENEMY + ROWS*CELL/2) : (Y_MINE + ROWS*CELL/2);
+  /* 范围技的圆心 = 敌兵正在走的这半场的中心。
+     敌方来兵在我方半场往下走、我方出击兵在敌方半场往上走，
+     所以圈心永远在「自己守的这块」的正中 —— 以前算到对面半场中心，
+     那儿根本没有敌兵，范围一收窄大招就完全打空了。 */
+  const zoneX = BX + COLS*CELL/2;
+  const zoneY = S.baseY + ROWS*CELL/2;
   const beamEnd = mine ? 20 : H - 20;          // 光束打到对面那侧的尽头
+  /* 大招强度基准：只覆盖「敌军半场中路一圈」，倍率砍半，CD 全面上调 ——
+     原版是全场无差别 + 8-11 秒一次，一个 5 阶名将自己就能清一整波，其他单位全成摆设。 */
   switch (sk){
     case 'longdan': {
+      // 龙胆：光束仍是全场视觉，但只伤「贴着这条枪」一路的兵（横向 1.5 格内）
       G.fx.push({ type:'beam', x1:cx, y1:cy, x2:cx, y2:beamEnd, t:0, dur:0.55 });
-      for (const e of [...foes]) dealFrom(u, e, A*2.4, mine);
+      for (const e of [...foes]) if (Math.abs(e.x - cx) <= 108) dealFrom(u, e, A*1.2, mine);
       burst(cx, cy, 26, S.color); toast(tag + '赵云 · 龙胆！'); sfx('hero'); break;
     }
     case 'wusheng': {
@@ -1846,29 +1854,35 @@ function castHeroSkill(u, mine){
         for (const o of foes) if (Math.abs(o.x-e.x)<170 && Math.abs(o.y-e.y)<170) n++;
         if (n > bn){ bn = n; best = e; }
       }
-      const tx = best ? best.x : foeMidX, ty = best ? best.y : foeMidY;
+      const tx = best ? best.x : zoneX, ty = best ? best.y : zoneY;
       G.fx.push({ type:'ring', x:tx, y:ty, r0:20, r1:200, t:0, dur:0.5, color:SEAL });
-      for (const e of [...foes]) if (Math.abs(e.x-tx)<200 && Math.abs(e.y-ty)<200) dealFrom(u, e, A*2.6, mine);
+      for (const e of [...foes]) if (Math.abs(e.x-tx)<200 && Math.abs(e.y-ty)<200) dealFrom(u, e, A*1.4, mine);
       burst(tx, ty, 26, SEAL); toast(tag + '关羽 · 武圣！'); sfx('hero'); break;
     }
     case 'dangyang': {
-      G.fx.push({ type:'ring', x:foeMidX, y:foeMidY, r0:20, r1:470, t:0, dur:0.6, color:INK });
-      for (const e of foes) e.stun = Math.max(e.stun || 0, 3.0);
+      // 当阳桥：只震晕敌军中路 330 半径内的兵（原来全场 3 秒 = 敌方整波停摆）
+      G.fx.push({ type:'ring', x:zoneX, y:zoneY, r0:20, r1:330, t:0, dur:0.6, color:INK });
+      for (const e of foes) if (Math.hypot(e.x-zoneX, e.y-zoneY) <= 330)
+        e.stun = Math.max(e.stun || 0, 2.2);
       toast(tag + '张飞 · 当阳桥断喝！'); sfx('hero'); break;
     }
     case 'rende': {
-      for (const o of S.board) if (o && o.kind !== 'char') o.hp = Math.min(o.maxHp, o.hp + o.maxHp*0.35);
-      for (const e of [...foes]) dealFrom(u, e, A*0.8, mine);
+      for (const o of S.board) if (o && o.kind !== 'char') o.hp = Math.min(o.maxHp, o.hp + o.maxHp*0.25);
+      for (const e of [...foes]) if (Math.hypot(e.x-zoneX, e.y-zoneY) <= 300) dealFrom(u, e, A*0.45, mine);
       G.fx.push({ type:'ring', x:cx, y:cy, r0:20, r1:300, t:0, dur:0.7, color:'#2f7d4f' });
       toast(tag + '刘备 · 仁德！'); sfx('hero'); break;
     }
     case 'liegong': {
-      G.fx.push({ type:'rain', t:0, dur:3.0, tick:0, dmg: A*0.62, mine, src:u });
+      // 烈弓：箭雨只覆盖敌军中路一圈（打击判定与视觉同心），跳伤 0.34、时长 2.2 秒
+      G.fx.push({ type:'ring', x:zoneX, y:zoneY, r0:20, r1:340, t:0, dur:0.6, color:'#8a5a06' });
+      G.fx.push({ type:'rain', t:0, dur:2.2, tick:0, dmg: A*0.34, mine, src:u, cx:zoneX, cy:zoneY, r:340 });
       toast(tag + '黄忠 · 烈弓箭雨！'); sfx('hero'); break;
     }
     case 'tieqi': {
-      G.fx.push({ type:'ring', x:foeMidX, y:foeMidY, r0:20, r1:470, t:0, dur:0.6, color:'#2a5fa8' });
-      for (const e of [...foes]){ e.slowT = 4.0; dealFrom(u, e, A*0.9, mine); }
+      G.fx.push({ type:'ring', x:zoneX, y:zoneY, r0:20, r1:330, t:0, dur:0.6, color:'#2a5fa8' });
+      for (const e of [...foes]) if (Math.hypot(e.x-zoneX, e.y-zoneY) <= 330){
+        e.slowT = 3.0; dealFrom(u, e, A*0.5, mine);
+      }
       toast(tag + '马超 · 铁骑踏阵！'); sfx('hero'); break;
     }
   }
@@ -2331,7 +2345,8 @@ function updateFx(dt){
       if (f.tick <= 0){
         f.tick = 0.22;
         const foes = marchersOf(f.mine ? 'ai' : 'me');
-        for (const e of foes) dealFrom(f.src, e, f.dmg, !!f.mine);
+        for (const e of foes)
+          if (f.cx === undefined || Math.hypot(e.x-f.cx, e.y-f.cy) <= f.r) dealFrom(f.src, e, f.dmg, !!f.mine);
         const y0 = f.mine ? Y_ENEMY - 20 : Y_MINE - 20, y1 = y0 + ROWS*CELL;
         for (let k=0;k<3;k++) burst(rnd(BX, BX + COLS*CELL), rnd(y0, y1), 3, INK2);
       }
