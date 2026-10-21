@@ -228,7 +228,25 @@ function aiLandOK(cell){
   if (FREE_E[cell]) return true;
   return !!(G && G.aiUnlocked && G.aiUnlocked[cell]);
 }
-const AI_TICK = 0.55;        // 电脑对手的决策间隔（秒）
+const AI_TICK = 0.55;        // 电脑对手的决策间隔（秒），真值取 AI_LEVELS[lv].tick
+/* ---------------- 电脑难度 ----------------
+   强度只调「决策质量」，不调兵种数值 —— 调数值会变成"AI 在作弊"，玩家一眼看得出来。
+   四个旋钮：
+     tick      多久想一次棋（越短越像个手快的人）
+     raiderCap 同时在路上的主动出击兵上限（人类可以随时把整手牌倒上路）
+     maxChars  盘上肯留几个"还没配成对"的单字（决定它拼不拼得出名将）
+     holdFree  至少留几格空地才肯拿单字去占坑
+     shieldAt  掉到几命就舍得开神兵符
+     rush      会不会在开波前把落不下的兵集中推上路
+   改难度只动这张表。 */
+const AI_LEVELS = [
+  { name:'新兵', desc:'想得慢，忘了往路上推兵', tick:0.80, raiderCap:3, maxChars:3, holdFree:5, shieldAt:1, rush:false },
+  { name:'老将', desc:'会留格拼将，开波前集中推兵', tick:0.55, raiderCap:6, maxChars:5, holdFree:2, shieldAt:2, rush:true  },
+  { name:'枭雄', desc:'想得快，路上常年压着 9 个兵', tick:0.40, raiderCap:9, maxChars:7, holdFree:1, shieldAt:2, rush:true  },
+];
+let AI_LV = 1;                       // 默认「老将」；0 新兵 / 1 老将 / 2 枭雄
+const AIC = () => AI_LEVELS[clamp(AI_LV | 0, 0, AI_LEVELS.length - 1)];
+function setAILevel(n){ AI_LV = clamp(n | 0, 0, AI_LEVELS.length - 1); return AI_LEVELS[AI_LV].name; }
 /* 电脑盘上最多留几个「还没配成对」的单字（它们只是等伙伴的种子）。
    单字落地只是个占位道具（血 1、不会攻击），堆多了就是把熟地变成死地。 */
 const AI_MAX_CHARS = 3;
@@ -1949,7 +1967,7 @@ function aiUseActives(){
   for (let i = 0; i < G.ai.actives.length; i++){
     const id = G.ai.actives[i];
     if (id === 'shenbing'){
-      if (G.enLife <= 1 && G.aiShield <= 0){
+      if (G.enLife <= AIC().shieldAt && G.aiShield <= 0){
         G.aiShield = 6; G.ai.actives.splice(i,1);
         G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:20, r1:150, t:0, dur:0.5, color:GOLD });
         toast('敌方使用 · 神兵符！');
@@ -2026,13 +2044,13 @@ function aiRaiderCount(){
    免得一路铺满死字、把熟地占干。 */
 function aiCharWorth(ch){
   if (aiCharSpot(ch) >= 0) return true;
-  return aiCharCount() < AI_MAX_CHARS && aiEmptyLand() >= AI_HOLD_FREE;
+  return aiCharCount() < AIC().maxChars && aiEmptyLand() >= AIC().holdFree;
 }
 /* 落子：优先把手牌叠到场上同种的守军上（合成升阶，等级可差 1 阶），其次铺到空位 */
 function aiPlace(){
-  // 电脑也要把熟地铺满、再靠铲子往外扩。两边地界完全对等
-  // （开局各 10 格熟地，之后各靠自己的铲子挖），所以上限对着同一个数来。
-  const target = clamp(18 + Math.floor(G.wave*1.6), 18, 37);
+  // 布阵上限 = 自己实际能用的地格数（有空地就继续铺）。
+  // 原来写死成 18+波次×1.6，而整局地格只有 10-13 格，这个数永远达不到 ——
+  // AI 一直以为「盘还没铺满」，于是几乎不往路上派兵，进攻能力等于没有。
   let cnt = boardCount(G.enBoard);
   let placed = 0;
 
@@ -2081,9 +2099,9 @@ function aiPlace(){
       merged = true; placed++;
     }
     if (merged) continue;
-    // 2) 铺到空位（场上人还不满时）
+    // 2) 铺到空位（还有空地就铺）
     let done = false;
-    if (cnt < target){
+    if (aiEmptyLand() > 0){
       const empt = [];
       for (let i = 0; i < G.enBoard.length; i++)
         if (!G.enBoard[i] && !isPathCell(i, false) && !isAduCell(i, false) && aiLandOK(i)) empt.push(i);
@@ -2109,9 +2127,9 @@ function aiPlace(){
         }
       }
     }
-    // 2b) 盘上已经铺够了：多余的兵放上路 -> 变成出击兵，从它的半场朝我这边打过来。
-    //     和玩家同一套规则（spawnRaider），只是起点用电脑自己半场的路头。
-    if (!done && t.kind === 'unit' && aiRaiderCount() < 3 && Math.random() < 0.85){
+    // 2b) 盘上放不下了：多余的兵放上路 -> 变成出击兵，从它的半场朝我这边打过来。
+    //     和玩家同一套规则（spawnRaider），只是起点用电脑自己半场的路头；上限按难度给。
+    if (!done && t.kind === 'unit' && freeRoadSlots(false) > 0 && aiRaiderCount() < AIC().raiderCap){
       // 放不进棋盘的兵不干等：派上路，从路头往下走两格再过缝，别显得像瞬移
       const cell = PATH_CELLS_E[Math.min(2, PATH_CELLS_E.length - 1)];
       if (cell !== undefined && spawnRaider('ai', cell, t.type, t.level)){
@@ -2206,7 +2224,7 @@ function aiJunkCharCell(){
 }
 function aiTick(dt){
   G.ai.t += dt;
-  if (G.ai.t < AI_TICK) return;
+  if (G.ai.t < AIC().tick) return;
   G.ai.t = 0;
   aiUseActives();
   aiPlace();
@@ -2215,6 +2233,24 @@ function aiTick(dt){
   for (const t of G.ai.hand){ if (aiTilePlaceable(t, true)){ canPlace = true; break; } }
   if (!canPlace){ aiEnlist(); aiPlace(); }
   refreshAiBonds();
+  // 开波前 1.5 秒：把落不下的兵一股脑推上路。
+  // 人类一直是这么打的（手牌随时能丢到路上当免费进攻兵），AI 以前从不这么做，
+  // 所以它的进攻能力几乎为零 —— 这是它最大的短板。
+  if (AIC().rush && G.phase === 'battle'){
+    const left = WAVE_GAP - G.waveT;
+    if (left > 0 && left <= 1.6) aiFlushHand();
+  }
+}
+/* 把手牌里「上不了盘」的兵推上路：每个是一份免费进攻战力（玩家点一下就做到，AI 以前做不到） */
+function aiFlushHand(){
+  for (let i = G.ai.hand.length - 1; i >= 0; i--){
+    const t = G.ai.hand[i];
+    if (!t || t.kind !== 'unit') continue;
+    if (freeRoadSlots(false) <= 0) return;
+    const cell = PATH_CELLS_E[Math.min(2, PATH_CELLS_E.length - 1)];
+    if (cell === undefined) return;
+    if (spawnRaider('ai', cell, t.type, t.level)) G.ai.hand.splice(i, 1);
+  }
 }
 /* ============================================================
    神秘商人 / 道具
@@ -3665,7 +3701,7 @@ function drawToast(){
 /* ---------------- 说明页 ---------------- */
 function drawIntro(){
   ctx.fillStyle = 'rgba(28,26,23,0.55)'; ctx.fillRect(0,0,W,H);
-  const pw = 620, ph = 900, px = (W-pw)/2, py = (H-ph)/2;
+  const pw = 620, ph = 1000, px = (W-pw)/2, py = (H-ph)/2;
   ctx.fillStyle = PAPER_L;
   rr(ctx, px, py, pw, ph, 18); ctx.fill();
   ctx.strokeStyle = 'rgba(90,80,65,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
@@ -3681,7 +3717,7 @@ function drawIntro(){
     ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局 7 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
     ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝沿自家路赶到出兵格后面、一格一个排好队（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
     ['四', '征兵', '开局 8 馒头；征一次 5 个，之后每征一次 +1，只涨不降（旧兵与铲子回收成馒头）；兵营里的单字会在征兵时自动换成 1 级兵，直接排上我方路'],
-    ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；主公每挨一击补 3'],
+    ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；主公挨打只掉命、不给钱'],
     ['六', '合成与成长', '同种同阶相叠升阶（1+1 → 2 阶）；两字相邻召将；名将杀敌攒经验自动升阶 —— 合成不是唯一的路'],
     ['七', '点击查看', '点棋盘上任意单位或手牌，都能看到攻击力、攻速、范围与移动速度（都按「格」算）'],
   ];
@@ -3733,7 +3769,25 @@ function drawIntro(){
   ctx.fillStyle = SEAL; ctx.font = '13px ' + FONT;
   ctx.fillText('操作：拖动布阵 · 相邻两字自动召名将 · 拖到已有守军的格子上可换位', W/2, py + 798);
 
-  const b = { x: W/2 - 150, y: py + ph - 78, w: 300, h: 58 };
+  // 难度：只改电脑的决策质量（想棋快慢、出门兵数、肯不肯留格拼将、会不会集中推兵）
+  G._lvBtns = [];
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
+  ctx.fillText('难度', W/2 - 250, py + 836);
+  for (let i = 0; i < AI_LEVELS.length; i++){
+    const on = (i === AI_LV);
+    const r = { x: W/2 - 206 + i*140, y: py + 818, w: 128, h: 36 };
+    G._lvBtns.push({ i, r });
+    ctx.fillStyle = on ? 'rgba(176,58,46,0.92)' : 'rgba(90,80,65,0.10)';
+    rr(ctx, r.x, r.y, r.w, r.h, 10); ctx.fill();
+    if (!on){ ctx.strokeStyle = 'rgba(90,80,65,0.22)'; ctx.lineWidth = 1; rr(ctx, r.x, r.y, r.w, r.h, 10); ctx.stroke(); }
+    ctx.fillStyle = on ? '#fff6ee' : INK2; ctx.font = (on ? 'bold ' : '') + '15px ' + FONT;
+    ctx.fillText(AI_LEVELS[i].name, r.x + r.w/2, r.y + r.h/2 + 1);
+  }
+  ctx.fillStyle = INK3; ctx.font = '11px ' + FONT;
+  ctx.fillText(AI_LEVELS[AI_LV].name + ' · ' + AI_LEVELS[AI_LV].desc, W/2, py + 872);
+
+  const b = { x: W/2 - 150, y: py + ph - 70, w: 300, h: 58 };
   G._startBtn = b;
   ctx.fillStyle = 'rgba(70,60,45,0.18)';
   rr(ctx, b.x+2, b.y+3, b.w, b.h, 14); ctx.fill();
@@ -3994,6 +4048,7 @@ function onDown(ev){
   if (canPause() && inRect(p, BTN_PAUSE)){ setPaused(true); return; }
 
   if (G.phase === 'intro'){
+    for (const b of (G._lvBtns || [])) if (inRect(p, b.r)){ sfx('click'); setAILevel(b.i); return; }
     if (G._startBtn && inRect(p, G._startBtn)){ sfx('click'); startBattle(); }
     return;
   }
@@ -4258,7 +4313,7 @@ window.__api = {
   addHeroXp, heroXpNeed, heroMaxLv, heroXpGain, releaseQueue, dealFrom, HERO_XP,
   ownPathSpeedMul, queueRank, headRemain, routeRemainTo, OWN_PATH_SPD_CAP, OWN_PATH_SPD_BASE,
   partnersOf, aiCharSpot, aiJunkCharCell, aiEmptyLand, aiCharCount, aiCharWorth,
-  aiTilePlaceable, AI_HOLD_FREE, AI_MAX_CHARS,
+  aiTilePlaceable, AI_HOLD_FREE, AI_MAX_CHARS, AI_LEVELS, AIC, setAILevel, aiFlushHand,
   unitCells, unitPos, unitW, boardCount, eachUnit, clearCells, findHeroSpan, isAnchor,
   isAduCell, inspectAt, closeInspect, makeInspect, statAtkOf, rateOf, rangeOf, spdOf, cellStr, spdStr,
   newUnit, fuseUnit, toUnitObject,

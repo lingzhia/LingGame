@@ -9,7 +9,8 @@
     font-family:-apple-system,"PingFang SC",sans-serif;color:#ddd8c8;user-select:none}
   #cv{display:block;position:absolute;inset:0;cursor:crosshair}
   #hud{position:absolute;left:0;top:0;padding:8px 14px;font-size:12px;line-height:1.75;
-    color:#93a382;font-variant-numeric:tabular-nums;pointer-events:none}
+    color:#93a382;font-variant-numeric:tabular-nums;pointer-events:none;
+    text-shadow:0 1px 2px rgba(0,0,0,.7)}
   #hud b{color:#ffd76a;font-weight:600}
   #help{position:absolute;left:50%;bottom:16px;transform:translateX(-50%);
     font-size:12px;color:#8d9c7d;background:rgba(14,18,13,.82);
@@ -24,6 +25,7 @@
 </div>
 <div id="help">左键框选 / 点选 · Shift 加选 · 右键移动 · WASD 或推边平移 · 滚轮缩放 · 中键拖拽</div>
 
+<script src="sprites.js"></script>
 <script>
 (function(){
 'use strict';
@@ -36,13 +38,10 @@
      2) 逻辑 tick：固定 30Hz，只改数据，不碰画布
      3) 渲染：把 (x, y, z) 投影成屏幕，按深度排序后画上去
 
-   投影公式（世界 → 屏幕，像素）：
-     sx = (x - y) * TILE_W/2
-     sy = (x + y) * TILE_H/2 - z
-   反算公式在 s2g()，点击拾取全靠它。
+   投影：sx = (x - y) * 32 ; sy = (x + y) * 16 - z
    ========================================================================= */
 
-const TILE_W = 64, TILE_H = 32;          // 2:1 菱形，RA2 同款比例
+const TILE_W = 64, TILE_H = 32;
 const HALF_W = TILE_W/2, HALF_H = TILE_H/2;
 const MW = 60, MH = 60;
 const TICK = 1/30;
@@ -51,30 +50,34 @@ const isoX = (x, y) => (x - y) * HALF_W;
 const isoY = (x, y, z) => (x + y) * HALF_H - (z || 0);
 
 /* ---------- 世界状态 ---------- */
-const W = { t: 0, units: [], buildings: [], sel: [], marks: [] };
+const W = { t: 0, units: [], buildings: [], props: [], ore: [], sel: [], marks: [] };
 let uid = 1;
 
 const UNIT_DEF = {
-  inf:  { hp: 80,  speed: 3.2, r: .34, h: 10 },
-  tank: { hp: 300, speed: 3.9, r: .46, h: 14 },
+  inf:  { hp: 80,  speed: 3.2, r: .34 },
+  tank: { hp: 300, speed: 3.9, r: .46 },
+  harv: { hp: 210, speed: 3.4, r: .46 },
 };
 
 function addUnit(type, x, y, owner){
   const d = UNIT_DEF[type];
   const u = { id: uid++, type, owner, x, y, px: x, py: y,
-              hp: d.hp, maxHp: d.hp, speed: d.speed, r: d.r, h: d.h,
+              hp: d.hp, maxHp: d.hp, speed: d.speed, r: d.r,
               dest: null, face: owner ? Math.PI : 0 };
   W.units.push(u);
   return u;
 }
 
-function addBuilding(type, tx, ty, w, h, owner, height){
-  const b = { id: uid++, type, tx, ty, w, h, owner, height };
-  W.buildings.push(b);
-  return b;
+function addBuilding(type, tx, ty, owner){
+  const d = ART.BLD[type];
+  W.buildings.push({ id: uid++, type, tx, ty, w: d.w, h: d.h, owner, H: d.H });
 }
 
-/* ---------- 相机：坐标存在"投影后的屏幕空间"，平移手感最直接 ---------- */
+function addProp(kind, x, y){
+  W.props.push({ kind, x, y, v: (Math.random()*3)|0 });
+}
+
+/* ---------- 相机 ---------- */
 const cam = { x: 0, y: 0, z: 1 };
 const clamp = (v,a,b)=> v<a?a:v>b?b:v;
 
@@ -88,6 +91,7 @@ function resize(){
   cv.width = VW*DPR; cv.height = VH*DPR;
   cv.style.width = VW+'px'; cv.style.height = VH+'px';
   ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.imageSmoothingEnabled = true;
 }
 window.addEventListener('resize', resize);
 
@@ -103,10 +107,8 @@ const s2g = (sx, sy)=>{
 };
 
 function clampCam(){
-  const minX = isoX(0, MH), maxX = isoX(MW, 0);
-  const minY = 0,          maxY = isoY(MW, MH, 0);
-  cam.x = clamp(cam.x, minX, maxX);
-  cam.y = clamp(cam.y, minY, maxY);
+  cam.x = clamp(cam.x, isoX(0, MH), isoX(MW, 0));
+  cam.y = clamp(cam.y, 0, isoY(MW, MH, 0));
 }
 
 /* ---------- 输入 ---------- */
@@ -159,7 +161,6 @@ function separate(){
   }
 }
 
-/* 命令：编队散开，别全挤在一个格点上 */
 function orderMove(units, gx, gy){
   const n = units.length;
   if(!n) return;
@@ -186,16 +187,19 @@ function render(){
   ctx.fillRect(0,0,VW,VH);
 
   drawGround();
+  drawOre();
   drawMarks();
 
-  /* 深度排序：x+y 越大越靠近镜头。
-     建筑用"前沿角"(tx+w, ty+h) 参与排序，这样单位才能正确地从楼前走过。 */
+  /* 深度排序：x+y 越大越近。
+     建筑用前沿角 (tx+w, ty+h) 参与排序，单位才能正确地从楼前走过。 */
   const list = [];
   for(const b of W.buildings) list.push({ d: b.tx + b.ty + b.w + b.h, b });
+  for(const p of W.props)     list.push({ d: p.x + p.y, p });
   for(const u of W.units)     list.push({ d: u.x + u.y, u });
   list.sort((a,b)=> a.d - b.d);
   for(const it of list){
     if(it.b) drawBuilding(it.b);
+    else if(it.p) drawProp(it.p);
     else drawUnit(it.u);
   }
 
@@ -204,8 +208,6 @@ function render(){
   drawHud();
 }
 
-/* 地面：把可见区域换算成格范围，只画这些菱形。
-   偶/奇两批各走一条 path 再一次 fill，省掉上千次状态切换。 */
 function drawGround(){
   const cs = [s2g(0,0), s2g(VW,0), s2g(0,VH), s2g(VW,VH)];
   let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9;
@@ -217,12 +219,14 @@ function drawGround(){
   y0 = Math.max(0, Math.floor(y0)-1); y1 = Math.min(MH-1, Math.ceil(y1)+1);
 
   const hw = HALF_W*cam.z, hh = HALF_H*cam.z;
+  const COLORS = ['#4f5f3e', '#556542', '#475636'];
 
-  for(let parity=0; parity<2; parity++){
+  for(let k=0;k<3;k++){
     ctx.beginPath();
     for(let ty=y0; ty<=y1; ty++){
       for(let tx=x0; tx<=x1; tx++){
-        if(((tx+ty)&1) !== parity) continue;
+        const n = ((tx*73856093) ^ (ty*19349663)) >>> 0;
+        if(n % 3 !== k) continue;
         const c = w2s(tx+.5, ty+.5, 0);
         ctx.moveTo(c.x, c.y - hh);
         ctx.lineTo(c.x + hw, c.y);
@@ -231,7 +235,7 @@ function drawGround(){
         ctx.closePath();
       }
     }
-    ctx.fillStyle = parity ? '#4a5a3a' : '#536343';
+    ctx.fillStyle = COLORS[k];
     ctx.fill();
   }
 
@@ -243,94 +247,66 @@ function drawGround(){
       if(ty <= y1){ const c = w2s(tx, ty+1, 0); ctx.moveTo(a.x,a.y); ctx.lineTo(c.x,c.y); }
     }
   }
-  ctx.strokeStyle = 'rgba(0,0,0,.13)';
+  ctx.strokeStyle = 'rgba(0,0,0,.10)';
   ctx.lineWidth = 1;
   ctx.stroke();
+}
+
+function drawOre(){
+  const z = cam.z;
+  for(const t of W.ore){
+    const p = w2s(t.x + .5, t.y + .5, 0);
+    if(p.x < -90*z || p.x > VW+90*z || p.y < -90*z || p.y > VH+90*z) continue;
+    const sp = ART.ore(t.v);
+    ctx.drawImage(sp.img, p.x - sp.ax*z, p.y - sp.ay*z, sp.w*z, sp.h*z);
+  }
+}
+
+function drawProp(p){
+  const z = cam.z;
+  const s = w2s(p.x, p.y, 0);
+  const sp = ART.prop(p.kind + p.v);
+  ctx.drawImage(sp.img, s.x - sp.ax*z, s.y - sp.ay*z, sp.w*z, sp.h*z);
+}
+
+/* 单位朝向 → 精灵角度。
+   等距下"格坐标里的方向"和"屏幕上的方向"不是同一个角，这里做一次换算。 */
+function spriteAngle(face){
+  const c = Math.cos(face), s = Math.sin(face);
+  return Math.round(Math.atan2(s + c, c - s) / (Math.PI*2) * ART.DIRS);
 }
 
 function drawUnit(u){
   const x = u.px + (u.x-u.px)*alpha;
   const y = u.py + (u.y-u.py)*alpha;
-  const base = w2s(x, y, 0);
+  const s = w2s(x, y, 0);
   const z = cam.z;
-  const blue = u.owner === 0;
-  const r = u.r * HALF_W * z;
-  const lift = u.h * z;
 
-  ctx.fillStyle = 'rgba(0,0,0,.32)';
+  ctx.fillStyle = 'rgba(0,0,0,.26)';
   ctx.beginPath();
-  ctx.ellipse(base.x, base.y, r*.95, r*.5, 0, 0, 7);
+  ctx.ellipse(s.x, s.y, 12*z, 5.5*z, 0, 0, 7);
   ctx.fill();
 
-  // 身体抬起一点，看起来是"站在地上"而不是"贴在地上"
-  const by = base.y - lift;
-  ctx.fillStyle = blue ? '#4d84c9' : '#c9564a';
-  ctx.beginPath(); ctx.arc(base.x, by, r, 0, 7); ctx.fill();
-  ctx.strokeStyle = blue ? '#a9cdf5' : '#f0b0a4';
-  ctx.lineWidth = Math.max(1, 1.3*z);
-  ctx.stroke();
-
-  // 朝向：投影到菱形空间，避免朝左下时线是斜的却看着不对
-  const f = Math.atan2(Math.sin(u.face)*HALF_H, Math.cos(u.face)*HALF_W);
-  ctx.beginPath();
-  ctx.moveTo(base.x, by);
-  ctx.lineTo(base.x + Math.cos(f)*r*1.6, by + Math.sin(f)*r*1.6);
-  ctx.stroke();
+  const sp = ART.unit(u.type, u.owner, spriteAngle(u.face));
+  ctx.drawImage(sp.img, s.x - sp.ax*z, s.y - sp.ay*z, sp.w*z, sp.h*z);
 }
 
 function drawBuilding(b){
   const z = cam.z;
-  const H = b.height * z;
-  const pA = w2s(b.tx,      b.ty,      0);
-  const pB = w2s(b.tx+b.w,  b.ty,      0);
-  const pC = w2s(b.tx+b.w,  b.ty+b.h,  0);
-  const pD = w2s(b.tx,      b.ty+b.h,  0);
-  const blue = b.owner === 0;
-  const top   = blue ? '#6d8296' : '#8d6a5e';
-  const right = blue ? '#46586a' : '#5c4238';
-  const left  = blue ? '#374754' : '#4a352d';
-
-  ctx.fillStyle = 'rgba(0,0,0,.28)';
-  ctx.beginPath();
-  ctx.moveTo(pA.x+4*z, pA.y+5*z); ctx.lineTo(pB.x+4*z, pB.y+5*z);
-  ctx.lineTo(pC.x+4*z, pC.y+5*z); ctx.lineTo(pD.x+4*z, pD.y+5*z);
-  ctx.closePath(); ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(pB.x, pB.y-H); ctx.lineTo(pC.x, pC.y-H);
-  ctx.lineTo(pC.x, pC.y);   ctx.lineTo(pB.x, pB.y);
-  ctx.closePath(); ctx.fillStyle = right; ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(pC.x, pC.y-H); ctx.lineTo(pD.x, pD.y-H);
-  ctx.lineTo(pD.x, pD.y);   ctx.lineTo(pC.x, pC.y);
-  ctx.closePath(); ctx.fillStyle = left; ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(pA.x, pA.y-H); ctx.lineTo(pB.x, pB.y-H);
-  ctx.lineTo(pC.x, pC.y-H); ctx.lineTo(pD.x, pD.y-H);
-  ctx.closePath(); ctx.fillStyle = top; ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,.18)';
-  ctx.lineWidth = Math.max(1, 1.2*z);
-  ctx.stroke();
-
-  const cx = (pA.x+pC.x)/2, cy = (pA.y+pC.y)/2 - H;
-  ctx.fillStyle = blue ? '#9fc4ef' : '#f0b0a4';
-  ctx.beginPath();
-  ctx.moveTo(cx, cy-6*z); ctx.lineTo(cx+9*z, cy);
-  ctx.lineTo(cx, cy+6*z); ctx.lineTo(cx-9*z, cy);
-  ctx.closePath(); ctx.fill();
+  const c = w2s(b.tx + b.w/2, b.ty + b.h/2, 0);
+  const sp = ART.bld(b.type, b.owner);
+  ctx.drawImage(sp.img, c.x - sp.ax*z, c.y - sp.ay*z, sp.w*z, sp.h*z);
 }
 
 function drawSelRing(u){
   const x = u.px + (u.x-u.px)*alpha;
   const y = u.py + (u.y-u.py)*alpha;
   const p = w2s(x, y, 0);
-  const r = (u.r*HALF_W + 5) * cam.z;
-  ctx.strokeStyle = 'rgba(150,240,140,.9)';
+  const r = (u.r*HALF_W + 6) * cam.z;
+  ctx.strokeStyle = 'rgba(150,240,140,.95)';
   ctx.lineWidth = 1.6;
   ctx.beginPath();
-  ctx.ellipse(p.x, p.y, r, r*.5, 0, 0, 7);
+  ctx.ellipse(p.x, p.y + cam.z, r, r*.5, 0, 0, 7);
   ctx.stroke();
 }
 
@@ -423,7 +399,6 @@ cv.addEventListener('wheel', e=>{
   const before = s2g(e.clientX, e.clientY);
   cam.z = clamp(cam.z * (e.deltaY > 0 ? .88 : 1.14), .45, 1.8);
   const after = s2g(e.clientX, e.clientY);
-  // 缩放锚点：让鼠标下的那一格保持不动
   cam.x += isoX(before.x,before.y) - isoX(after.x,after.y);
   cam.y += isoY(before.x,before.y,0) - isoY(after.x,after.y,0);
   clampCam();
@@ -441,7 +416,6 @@ function pick(gx, gy){
   return best;
 }
 
-/* 框选：拿投影后的屏幕位置比。斜视角下"格子框"和"屏幕框"不是一回事。 */
 function boxSelect(x1,y1,x2,y2,additive){
   const ax = Math.min(x1,x2), bx = Math.max(x1,x2);
   const ay = Math.min(y1,y2), by = Math.max(y1,y2);
@@ -480,24 +454,57 @@ function updateCamera(dt){
 }
 
 /* =========================================================================
-   开局：左边一块蓝方小基地，右边一块红方，纯占位
+   开局
    ========================================================================= */
 function setup(){
   resize();
+  ART.build();
 
-  addBuilding('yard',     4, 44, 4, 4, 0, 34);
-  addBuilding('barracks', 9, 43, 3, 3, 0, 22);
-  addBuilding('yard',    52, 12, 4, 4, 1, 34);
-  addBuilding('barracks', 47, 14, 3, 3, 1, 22);
+  addBuilding('yard',     4, 44, 0);
+  addBuilding('barracks', 10, 44, 0);
+  addBuilding('power',    10, 40, 0);
+  addBuilding('yard',    52, 12, 1);
+  addBuilding('barracks', 46, 14, 1);
+  addBuilding('refinery', 48, 18, 1);
 
-  for(let i=0;i<6;i++) addUnit('inf', 6.5 + (i%3)*1.1, 49 + Math.floor(i/3)*1.1, 0);
-  for(let i=0;i<3;i++) addUnit('tank', 10 + i*1.4, 51, 0);
-  for(let i=0;i<5;i++) addUnit('inf', 49 + (i%3)*1.1, 19 + Math.floor(i/3)*1.1, 1);
-  for(let i=0;i<2;i++) addUnit('tank', 47 + i*1.4, 21, 1);
+  for(let i=0;i<6;i++) addUnit('inf', 7 + (i%3)*1.1, 49 + Math.floor(i/3)*1.1, 0);
+  for(let i=0;i<3;i++) addUnit('tank', 11 + i*1.5, 51, 0);
+  addUnit('harv', 13, 48, 0);
+  for(let i=0;i<5;i++) addUnit('inf', 45 + (i%3)*1.1, 21 + Math.floor(i/3)*1.1, 1);
+  for(let i=0;i<2;i++) addUnit('tank', 43 + i*1.5, 23, 1);
+  addUnit('harv', 51, 22, 1);
+
+  seedOre(16, 52, 3.2); seedOre(24, 46, 2.4);
+  seedOre(42, 8, 3.2);  seedOre(34, 14, 2.4);
+  seedOre(29, 29, 3.6); seedOre(31, 32, 2.6);
+  seedOre(12, 30, 2.2); seedOre(47, 36, 2.2);
+
+  const busy = (tx,ty)=>{
+    for(const b of W.buildings)
+      if(tx>=b.tx-1 && tx<=b.tx+b.w && ty>=b.ty-1 && ty<=b.ty+b.h) return true;
+    return false;
+  };
+  for(let i=0;i<200;i++){
+    const tx = 2 + Math.random()*(MW-4), ty = 2 + Math.random()*(MH-4);
+    if(busy(tx,ty)) continue;
+    if(W.ore.some(o=> Math.hypot(o.x-tx, o.y-ty) < 2.5)) continue;
+    addProp(Math.random() < .72 ? 'tree' : 'rock', tx, ty);
+  }
 
   cam.x = isoX(9, 48); cam.y = isoY(9, 48, 0);
   cam.z = 1;
   clampCam();
+}
+
+function seedOre(cx, cy, r){
+  for(let ty=Math.floor(cy-r); ty<=Math.ceil(cy+r); ty++){
+    for(let tx=Math.floor(cx-r); tx<=Math.ceil(cx+r); tx++){
+      if(tx<1||ty<1||tx>=MW-1||ty>=MH-1) continue;
+      const d = Math.hypot(tx+0.5-cx, ty+0.5-cy);
+      if(d > r - Math.random()*0.7) continue;
+      W.ore.push({ x:tx, y:ty, v:(Math.random()*3)|0 });
+    }
+  }
 }
 
 let last = performance.now(), acc = 0, fpsAcc = 0, fpsN = 0;
