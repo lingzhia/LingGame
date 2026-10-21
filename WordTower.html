@@ -1294,6 +1294,13 @@ function waveTier(n){ return clamp(1 + Math.floor((n-1)/4), 1, MAX_TIER); }
    想整体调难度就动这一个旋钮 —— 但一旦不等于 1，两边就不再对称了。
    只压血与攻，不压出手速度（攻速是兵种属性，出征不打折）。 */
 const MARCH_SCALE = 1;
+/* 行军兵的血量补偿：兵在路上只顾赶路，攻击力基本没机会打出来，
+   作为补偿血量翻倍 —— 路上的兵是「能扛的肉」，不是「能打的刀」。 */
+const MARCH_HP_MUL = 2;
+/* 17 波之后单兵品阶封顶 5 阶，若只加数量两边会无限对峙。
+   改为「精锐化」：17 波起每波血 +30%、移速 +20%（按超出 16 的波数叠乘），
+   一波比一波快且硬，必然分出胜负。 */
+const ELITE_FROM = 17, ELITE_HP = 1.3, ELITE_SPD = 1.2;
 
 /* 行军速度的全局倍率：兵种表里的 spd 就是「格/秒」，这里给一个全局系数。
    以前是 0.5（刀兵实际只走 0.5 格/秒），一条 20 格的路要 40 秒，
@@ -1383,26 +1390,29 @@ function enemySpec(n){
   if (n <= 2)      key = r < 0.55 ? 'dao' : (r < 0.85 ? 'qiang' : (r < 0.95 ? 'gong' : 'qi'));
   else if (n <= 5) key = r < 0.34 ? 'dao' : (r < 0.62 ? 'qiang' : (r < 0.84 ? 'gong' : 'qi'));
   else             key = r < 0.28 ? 'dao' : (r < 0.52 ? 'qiang' : (r < 0.76 ? 'gong' : 'qi'));
-  return { key, lv };
+  // 17 波起每波 +1 层精锐（血 ×1.3、移速 ×1.2 叠乘）
+  return { key, lv, elite: Math.max(0, n - (ELITE_FROM - 1)) };
 }
 
 /* ---------------- 行军兵（双方共用一套） ----------------
    owner:'ai' = 电脑的兵，从我的半场路头下来，打我的主公
    owner:'me' = 我方的出击兵，从路上朝对面走，打电脑的主公
    兵种、品阶、克制、血量、攻击全走 UNITS / TIER 同一张表 —— 两边没有任何数值差。 */
-function newMarcher(owner, key, level){
+function newMarcher(owner, key, level, elite){
   const u = UNITS[key];
   if (!u) return null;
   const lv = clamp(level || 1, 1, MAX_TIER);
   const st = TIER[lv];
   const k = MARCH_SCALE;                     // 两边同一个系数，不按 owner 分叉
-  const hp = Math.round(u.hp * st.hpMul * k);
+  const el = Math.max(0, elite | 0);         // 17 波后的精锐层数
+  const hp = Math.round(u.hp * st.hpMul * k * MARCH_HP_MUL * Math.pow(ELITE_HP, el));
   return {
-    owner, key, level: lv, char: u.char, name: u.name, vs: u.vs || [],
+    owner, key, level: lv, elite: el, char: u.char,
+    name: u.name + (el ? '+' + el : ''), vs: u.vs || [],
     hp, maxHp: hp,
     atk: u.atk * st.atkMul * k,
     rate: u.rate * st.rateMul,
-    range: u.range, spd: u.spd * CELL * MOVE_MUL, w: u.w, mantou: u.mantou,
+    range: u.range, spd: u.spd * CELL * MOVE_MUL * Math.pow(ELITE_SPD, el), w: u.w, mantou: u.mantou,
     x: 0, y: 0, route: [], ri: 0,
     cd: 0, stun: 0, slowT: 0, hurt: 0, flash: 0, born: 0,
     jit: (Math.random() - 0.5) * 9,
@@ -1410,7 +1420,7 @@ function newMarcher(owner, key, level){
 }
 /* 自动进攻兵：owner 的兵从自己这一侧的路头出生，沿路走向对面的主公 */
 function spawnWave(owner, spec){
-  const m = newMarcher(owner, spec.key, spec.lv);
+  const m = newMarcher(owner, spec.key, spec.lv, spec.elite);
   if (!m) return null;
   const halfMine = owner === 'ai';            // 敌兵走我的半场；我的进攻兵走对面半场
   const pts = pathPoints(halfMine);
@@ -3430,6 +3440,14 @@ function drawMarchers(v, foeHalf){
       ctx.fillStyle = '#fffaf0';
       ctx.font = 'bold ' + Math.round(bs*0.78) + 'px ' + FONT;
       ctx.fillText(String(e.level), s*0.10 + bs/2, -s*0.54 + bs/2 + 0.5);
+    }
+    if (e.elite > 0){
+      const bs = Math.round(s*0.30);
+      ctx.fillStyle = '#1c4f8c';
+      rr(ctx, s*0.90 - bs, -s*0.54, bs, bs, 3); ctx.fill();
+      ctx.fillStyle = '#fffaf0';
+      ctx.font = 'bold ' + Math.round(bs*0.72) + 'px ' + FONT;
+      ctx.fillText('+' + e.elite, s*0.90 - bs/2, -s*0.54 + bs/2 + 0.5);
     }
     if (e.stun > 0){
       ctx.strokeStyle = '#c79a26'; ctx.lineWidth = 2;
