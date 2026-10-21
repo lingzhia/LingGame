@@ -25,14 +25,14 @@
 
 /* ============================================================
    WordTower · 文字塔防（复刻）
-   核心：1V1 上下分屏双线对攻 / 阿斗 3 命 / 8×8 棋盘 ·
-        出兵点一格、阿斗一格、中间一条蛇形路占若干格 /
+   核心：1V1 上下分屏双线对攻 / 主公 3 命 / 8×8 棋盘 ·
+        出兵点一格、主公一格、中间一条蛇形路占若干格 /
         蛇形路每局随机重掷（不许占满任何 2×2 田字格） /
         征兵一次刷新 5 格（旧牌自动回收） / 馒头只来自杀敌 /
         同字升阶 / 12 名将拼名召唤 / 羁绊 /
         神秘商人道具 / 白绿蓝紫金五品
    版式：竖屏 720×1446，分上中下三段 ——
-        上 1/3 左半是战况面板（馒头/波次/阿斗/羁绊），右半是敌军缩略图（点一下放大到上 2/3，再点收起）；
+        上 1/3 左半是战况面板（馒头/波次/主公/羁绊），右半是敌军缩略图（点一下放大到上 2/3，再点收起）；
         下 2/3 是玩家操作区：我方棋盘按 1.16 倍渲染 + 兵营 + 按键。
         世界坐标（两块 8×8 棋盘、格距 72、上下镜像）一个字没动，
         缩放只是「怎么画」，射程/行军/命中全在世界坐标里算，上下依旧完全对称。
@@ -45,8 +45,8 @@ const ctx = cv.getContext('2d');
 let SCALE = 1, DPR = 1;
 
 /* 棋盘：8 列 × 8 行的一张方阵。
-   出兵点与阿斗各自就是棋盘上的一个格子，两点之间用一条蛇形「路」连起来 ——
-   路格与阿斗格不可布防，其余格子才是能摆兵、摆将的地方。
+   出兵点与主公各自就是棋盘上的一个格子，两点之间用一条蛇形「路」连起来 ——
+   路格与主公格不可布防，其余格子才是能摆兵、摆将的地方。
    竖版比例：两块棋盘上下叠放，纵向一共 16 行格子 —— 画面天生偏瘦长。
    所以格子从 78 收到 72，上下留白（HUD / 中缝 / 手牌 / 按钮）一并压紧，
    整幅画布从 720×1620 收到 720×1446，左右留白用阵营标签填上。 */
@@ -60,7 +60,7 @@ const ADU_R = 24;
 const cellAt = (c, r) => c + r*COLS;
 
 /* 熟地（开局直接能布阵的格子）与荒地：
-   一局开始时只发 START_OPEN 格熟地 —— 从「离路近、贴着阿斗、靠前线」的次序里挑最好的几格，
+   一局开始时只发 START_OPEN 格熟地 —— 从「离路近、贴着主公、靠前线」的次序里挑最好的几格，
    其余可布防的格子全是荒地，得一格一格用铲子挖开。
    电脑半场拿的是同一张名单的上下镜像（FREE_E），两边地界完全对等。 */
 const START_OPEN = 5;
@@ -74,7 +74,7 @@ function computeFreeLand(){
     if (isRoad(i, true)) continue;
     cand.push(i);
   }
-  // 分数高的先给：离路近、挨着阿斗、越靠前线越好
+  // 分数高的先给：离路近、挨着主公、越靠前线越好
   cand.sort((a, b) => (cellScore(b, true) - cellScore(a, true)) || (a - b));
   FREE_M = {}; FREE_E = {};
   for (const i of cand.slice(0, START_OPEN)){
@@ -84,16 +84,16 @@ function computeFreeLand(){
 }
 
 /* ---------------- 随机地图 ----------------
-   一条「路」= 从出兵点（紧贴中缝那一行的一格）出发、一路往下蛇行到阿斗身前的一串格子。
-   本地坐标 [列, 行]：行 0 贴着中缝，行 ROWS-1 是最里侧（阿斗坐的那一行）。
+   一条「路」= 从出兵点（紧贴中缝那一行的一格）出发、一路往下蛇行到主公身前的一串格子。
+   本地坐标 [列, 行]：行 0 贴着中缝，行 ROWS-1 是最里侧（主公坐的那一行）。
    两条硬规矩：
-     1) 路是一串首尾相连、互不重叠的格子，最后停在与阿斗正交相邻的那一格；
-     2) 任何 2×2 田字格都不允许被路块（含阿斗那一格）占满 ——
+     1) 路是一串首尾相连、互不重叠的格子，最后停在与主公正交相邻的那一格；
+     2) 任何 2×2 田字格都不允许被路块（含主公那一格）占满 ——
         占满了就会出现一块实心死角，既糊成一团，也挡住布防视野。
    每次开局重掷一张；电脑半场用同一张图上下镜像，两边完全对等。 */
 
 let PATH_M = [];                     // 我方半场的路
-let ADU_M_C = [0, ROWS-1];           // 我方阿斗：路的尽头再往里一格
+let ADU_M_C = [0, ROWS-1];           // 我方主公：路的尽头再往里一格
 let PATH_E = [];                     // 电脑半场（上下镜像）
 let ADU_E_C = [0, 0];
 let PATH_CELLS_M = [], PATH_CELLS_E = [];
@@ -112,7 +112,7 @@ function mulberry32(a){
 }
 const mapInt = n => (mapRnd() * n) | 0;
 
-/* 掷一条候选路：从 (startC,0) 随机往下走，最后必须停在阿斗正上方那一格 */
+/* 掷一条候选路：从 (startC,0) 随机往下走，最后必须停在主公正上方那一格 */
 function rollPath(){
   const startC = mapInt(COLS), aduC = mapInt(COLS);
   const path = [], seen = {};
@@ -120,8 +120,8 @@ function rollPath(){
   let c = startC, r = 0, run = 0, guard = 0;
   push(c, r);
   while (guard++ < 160){
-    if (r === ROWS-2 && c === aduC) break;        // 停到阿斗跟前，收工
-    if (r === ROWS-2){                            // 倒数第二行：只朝阿斗那一列靠
+    if (r === ROWS-2 && c === aduC) break;        // 停到主公跟前，收工
+    if (r === ROWS-2){                            // 倒数第二行：只朝主公那一列靠
       c += (c < aduC ? 1 : -1);
       push(c, r);
       continue;
@@ -149,7 +149,7 @@ function rollPath(){
 function quadOK(path, aduC){
   const road = {};
   for (const p of path) road[p[1]*COLS + p[0]] = 1;
-  road[(ROWS-1)*COLS + aduC] = 1;                 // 阿斗那一格也是路
+  road[(ROWS-1)*COLS + aduC] = 1;                 // 主公那一格也是路
   for (let r = 0; r < ROWS-1; r++)
     for (let c = 0; c < COLS-1; c++)
       if (road[r*COLS+c] && road[r*COLS+c+1] &&
@@ -202,10 +202,10 @@ function pathList(mine){ return (mine === false) ? PATH_E : PATH_M; }
 function pathCells(mine){ return (mine === false) ? PATH_CELLS_E : PATH_CELLS_M; }
 function isPathCell(cell, mine){ return pathCells(mine).indexOf(cell) >= 0; }
 function isAduCell(cell, mine){ return cell === (mine === false ? ADU_E_CELL : ADU_M_CELL); }
-/* 路格 + 阿斗格：整条通道都不能布防 */
+/* 路格 + 主公格：整条通道都不能布防 */
 function isRoad(cell, mine){ return isPathCell(cell, mine) || isAduCell(cell, mine); }
 /* 路的折线点（格心）：敌兵沿着它一个点一个点地走，
-   走完最后一个点再往前一步就是阿斗 */
+   走完最后一个点再往前一步就是主公 */
 function pathPoints(mine){
   const base = (mine === false) ? Y_ENEMY : Y_MINE;
   return pathList(mine).map(p => ({ x: cellCX(p[0]), y: cellCY(p[0], p[1], base) }));
@@ -250,7 +250,7 @@ function aiCombOK(comb){
 
 /* ---------------- 版式：上中下三段 ----------------
    上 1/3 再横着切一半：
-     左半 = 战况面板（馒头 / 波次 / 阿斗 / 羁绊，能读的都放这儿）
+     左半 = 战况面板（馒头 / 波次 / 主公 / 羁绊，能读的都放这儿）
      右半 = 敌军缩略图（只读，点一下放大到上 2/3，再点收起）
    下 2/3 = 玩家操作区：我方棋盘（放大 1.16 倍渲染）+ 兵营 + 按键。
    世界坐标一个字没动 —— 两块棋盘还是同样大小、同样格距，
@@ -434,7 +434,7 @@ function addHeroXp(u, foe, mine){
   const p = unitPos(u, mine ? Y_MINE : Y_ENEMY);
   burst(p.x, p.y, 22, GOLD);
   floater(p.x, p.y - 44, 'Lv.' + u.level, mine ? GOLD : SEAL);
-  toast((mine ? '' : '电脑 ') + u.type + ' 升到 ' + u.level + ' 阶！');
+  toast((mine ? '' : '敌方 ') + u.type + ' 升到 ' + u.level + ' 阶！');
   sfx('hero');
   return up;
 }
@@ -512,13 +512,13 @@ const BONDS = [
 /* ---------------- 道具 ---------------- */
 const ITEMS = {
   shenbing: { name:'神兵符', icon:'符', type:'active', cost:9,  desc:'全队无敌 6 秒',   rarity:'gold' },
-  dabowu:   { name:'大补丸', icon:'丸', type:'active', cost:8,  desc:'我方阿斗回复 1 命', rarity:'purple' },
+  dabowu:   { name:'大补丸', icon:'丸', type:'active', cost:8,  desc:'我方主公回复 1 命', rarity:'purple' },
   maobi:    { name:'毛笔',   icon:'笔', type:'active', cost:6,  desc:'把一张手牌改成指定单字', rarity:'blue' },
   zhaoxian: { name:'招贤令', icon:'令', type:'passive',cost:8,  desc:'金将掉落率翻倍（永久）', rarity:'gold' },
   nongmin:  { name:'农夫',   icon:'农', type:'passive',cost:5,  desc:'击杀敌兵所得馒头 +35%（永久）',  rarity:'green' },
   luoyang:  { name:'洛阳铲', icon:'铲', type:'passive',cost:6,  desc:'每波额外获得 1 把铲子（永久）', rarity:'blue' },
   bingshu:  { name:'兵书残卷',icon:'书', type:'passive',cost:10, desc:'全队攻击 +20%（永久）', rarity:'purple' },
-  liangcao: { name:'粮草补给',icon:'粮', type:'passive',cost:7,  desc:'馒头产出 +20%、阿斗上限 +1 命', rarity:'purple' },
+  liangcao: { name:'粮草补给',icon:'粮', type:'passive',cost:7,  desc:'馒头产出 +20%、主公上限 +1 命', rarity:'purple' },
 };
 const SHOP_POOL = ['shenbing','dabowu','maobi','zhaoxian','nongmin','luoyang','bingshu','liangcao'];
 
@@ -1102,7 +1102,7 @@ function dropOnCellRaw(src, idx){
   const dst = G.board[idx];
   const from = src.__fromBoard;
 
-  if (isAduCell(idx, true)){ toast('这是阿斗的位置 · 不能布防'); sfx('hit'); return 'fail'; }
+  if (isAduCell(idx, true)){ toast('这是主公的位置 · 不能布防'); sfx('hit'); return 'fail'; }
 
   // 铲子开垦（放在最前面：路格本来就不能开垦，但也别回一句「只有普通兵能上路出击」）
   if (src.kind === 'shovel'){
@@ -1276,14 +1276,14 @@ const MARCH_SCALE = 1;
    穿场时间 20 秒上下，玩家照样有时间补防。 */
 const MOVE_MUL = 1.0;
 
-/* 自动进攻兵的路：从 pts[k] 之后一路走到对面阿斗 */
+/* 自动进攻兵的路：从 pts[k] 之后一路走到对面主公 */
 function forwardRoute(pts, k, adu){
   const r = [];
   for (let i = k + 1; i < pts.length; i++) r.push(pts[i]);
   r.push({ x: adu.x, y: adu.y });
   return r;
 }
-/* 出击兵的路：先沿自己半场的路往回走到中缝，过缝后沿对面半场的路打到对面阿斗。
+/* 出击兵的路：先沿自己半场的路往回走到中缝，过缝后沿对面半场的路打到对面主公。
    两张图是上下镜像的，所以「过缝」是同列垂直跨过去，不会横跳。 */
 function raiderRoute(halfMine, k){
   const own = pathPoints(halfMine);
@@ -1356,8 +1356,8 @@ function enemySpec(n){
 }
 
 /* ---------------- 行军兵（双方共用一套） ----------------
-   owner:'ai' = 电脑的兵，从我的半场路头下来，打我的阿斗
-   owner:'me' = 我方的出击兵，从路上朝对面走，打电脑的阿斗
+   owner:'ai' = 电脑的兵，从我的半场路头下来，打我的主公
+   owner:'me' = 我方的出击兵，从路上朝对面走，打电脑的主公
    兵种、品阶、克制、血量、攻击全走 UNITS / TIER 同一张表 —— 两边没有任何数值差。 */
 function newMarcher(owner, key, level){
   const u = UNITS[key];
@@ -1377,7 +1377,7 @@ function newMarcher(owner, key, level){
     jit: (Math.random() - 0.5) * 9,
   };
 }
-/* 自动进攻兵：owner 的兵从自己这一侧的路头出生，沿路走向对面的阿斗 */
+/* 自动进攻兵：owner 的兵从自己这一侧的路头出生，沿路走向对面的主公 */
 function spawnWave(owner, spec){
   const m = newMarcher(owner, spec.key, spec.lv);
   if (!m) return null;
@@ -1467,11 +1467,11 @@ function releaseQueue(){
 }
 
 /* 沿路推进：把 e 沿折线点往前走 dist 距离。
-   capped=true 时永远走不完最后一段 —— 被守军拦住就绝对摸不到阿斗。
-   返回 true 表示已经走到路的尽头（= 摸到阿斗）。 */
+   capped=true 时永远走不完最后一段 —— 被守军拦住就绝对摸不到主公。
+   返回 true 表示已经走到路的尽头（= 摸到主公）。 */
 /* 敌兵当前所在的那一格（用来算「有没有守军贴在路边」） */
 
-/* 守军是不是踩在「路」上（含阿斗格）。
+/* 守军是不是踩在「路」上（含主公格）。
    规则：只有路上的守军会被行军兵够到、被拦住；路外的守军＝后方火力，谁也打不到它。 */
 function defenderOnRoad(u, idx, mine){
   for (const k of unitCells(u)) if (isRoad(k, mine)) return true;
@@ -1553,7 +1553,7 @@ function ensureBuffs(mine){
 function ensureMyBuffs(){ ensureBuffs(true); }
 
 
-/* 沿路线往前走，返回 true 表示走到终点（= 摸到对面阿斗） */
+/* 沿路线往前走，返回 true 表示走到终点（= 摸到对面主公） */
 function marchForward(m, dist){
   let guard = 0;
   while (dist > 1e-6 && m.ri < m.route.length && guard++ < 12){
@@ -1682,17 +1682,17 @@ function killMyUnit(idx){ killDefender(true, idx); }
 
 function hitAdu(side){
   if (side === 'my'){
-    if (G.aduShield > 0) return;                 // 神兵符只保我方阿斗
+    if (G.aduShield > 0) return;                 // 神兵符只保我方主公
     G.myLife--; G.leaks++; sfx('lost');
     burst(ADU_M.x, ADU_M.y, 30, SEAL);
-    G.mantou += 3;                               // 阿斗每掉 1 命补 3 馒头（双方同规则）
-    floater(ADU_M.x, ADU_M.y - 58, '阿斗受伤 +3 馒头', GOLD);
+    G.mantou += 3;                               // 主公每掉 1 命补 3 馒头（双方同规则）
+    floater(ADU_M.x, ADU_M.y - 58, '主公受伤 +3 馒头', GOLD);
     if (G.myLife <= 0) endGame(false);
   } else {
     if (G.aiShield > 0) return;                 // 电脑的神兵符
     G.enLife--; G.aiLeaks++; sfx('hero');
     burst(ADU_E.x, ADU_E.y, 30, GOLD);
-    aiGain(3, ADU_E.x, ADU_E.y + 46);            // 电脑的阿斗挨打同样补 3 馒头
+    aiGain(3, ADU_E.x, ADU_E.y + 46);            // 电脑的主公挨打同样补 3 馒头
     if (G.enLife <= 0) endGame(true);
   }
 }
@@ -1798,7 +1798,7 @@ function castHeroSkill(u, mine){
   const cx = p0.x, cy = p0.y;
   const A = u.atk * S.atkMul;
   const foes = marchersOf(S.foe);              // 大招永远砸对面阵营的行军兵
-  const tag = mine ? '' : '电脑';
+  const tag = mine ? '' : '敌方';
   // 对面半场的中心：范围技的圆心、以及「一个目标都没找到」时的落点都用它
   const foeMidX = BX + COLS*CELL/2;
   const foeMidY = mine ? (Y_ENEMY + ROWS*CELL/2) : (Y_MINE + ROWS*CELL/2);
@@ -1848,7 +1848,7 @@ const castSkill = castHeroSkill;          // 旧名字保留，别处还在用
 /* ============================================================
    我方冲阵兵（对攻）
    ============================================================ */
-/* 追加 n 个兵到某一侧的进攻队列：'down' 是曹军打我，'up' 是我打电脑 */
+/* 追加 n 个兵到某一侧的进攻队列：'down' 是敌军打我，'up' 是我打电脑 */
 function sendAttack(side, n){
   if (side === 'down'){
     G.spawnLeft += n;
@@ -1862,13 +1862,13 @@ function sendAttack(side, n){
 /* ============================================================
    上半场的对手：电脑（同一个游戏的另一个玩家）
    规则与玩家几乎一致：馒头只来自杀敌、一次刷新 5 格手牌（旧牌上路）、
-   同种升阶（等级可差 1 阶）、两个单字拼名字召将、战功满则派兵来打我方阿斗。
+   同种升阶（等级可差 1 阶）、两个单字拼名字召将、战功满则派兵来打我方主公。
    异字合成（弩/骁/钺/铁/戟/骧）整体关闭（FUSE_ON=false），两边都不会再冒出这六种兵；
    玩家看到对面冒出没见过的兵种会当成作弊，可读性比对称性值钱。
    ============================================================ */
 function aiGain(v, x, y){
   G.ai.mantou += v;
-  if (x !== undefined) floater(x, y - 20, '电脑 +' + (Math.round(v*10)/10), SEAL);
+  if (x !== undefined) floater(x, y - 20, '敌方 +' + (Math.round(v*10)/10), SEAL);
 }
 /* 电脑击杀所得：与玩家的 mantouMul 同一个公式 */
 function aiKillReward(e){ return e.mantou * aiMantouMul(); }
@@ -1940,14 +1940,14 @@ function aiUseActives(){
       if (G.enLife <= 1 && G.aiShield <= 0){
         G.aiShield = 6; G.ai.actives.splice(i,1);
         G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:20, r1:150, t:0, dur:0.5, color:GOLD });
-        toast('电脑使用 · 神兵符！');
+        toast('敌方使用 · 神兵符！');
         return;
       }
     } else if (id === 'dabowu'){
       if (G.enLife < G.enMax){
         G.enLife++; G.ai.actives.splice(i,1);
         G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:10, r1:90, t:0, dur:0.45, color:'#b08ed0' });
-        toast('电脑使用 · 大补丸！');
+        toast('敌方使用 · 大补丸！');
         return;
       }
     } else if (id === 'maobi'){
@@ -2058,7 +2058,7 @@ function aiPlace(){
         for (const k of span) G.enBoard[k] = nu;
         const cx = (cellCX(colOf(span[0])) + cellCX(colOf(span[1]))) / 2;
         burst(cx, cellCY(colOf(span[0]), rowOf(span[0]), Y_ENEMY), 24, GOLD);
-        toast('电脑召出 · ' + comb.type + '！');
+        toast('敌方召出 · ' + comb.type + '！');
       } else {
         const nu = toUnitObject(comb, i);
         nu.born = 0;
@@ -2129,7 +2129,7 @@ function cellScore(i, mine){
   if (d <= 1) s += 6;
   else if (d === 2) s += 1.5;
   else s -= (d - 2) * 1.2;
-  // 贴着阿斗的格子是最后一道防线
+  // 贴着主公的格子是最后一道防线
   const aduC = mine ? ADU_M_C : ADU_E_C;
   const da = Math.max(Math.abs(c - aduC[0]), Math.abs(r - aduC[1]));
   if (da === 1) s += 3;
@@ -2138,7 +2138,7 @@ function cellScore(i, mine){
   s -= front * 0.22;
   return s;
 }
-/* 选格子：优先能拦停敌军的路边格，其次贴着阿斗的格子，其余往前压 */
+/* 选格子：优先能拦停敌军的路边格，其次贴着主公的格子，其余往前压 */
 function aiPickCell(empt){
   let best = empt[0], bs = -1e9;
   for (const i of empt){
@@ -2241,8 +2241,8 @@ function useActive(slot){
   const it = ITEMS[id];
   if (id === 'shenbing'){ G.aduShield = 6; toast('神兵符 · 全军无敌 6 秒'); }
   else if (id === 'dabowu'){
-    if (G.myLife >= G.myMax){ toast('阿斗已满命'); return; }
-    G.myLife++; toast('大补丸 · 阿斗回 1 命');
+    if (G.myLife >= G.myMax){ toast('主公已满命'); return; }
+    G.myLife++; toast('大补丸 · 主公回 1 命');
   }
   else if (id === 'maobi'){
     const filled = [];
@@ -2294,7 +2294,7 @@ function updateFx(dt){
 /* ============================================================
    主更新
    ============================================================ */
-/* 不设时间上限：一局只有一种结束方式 —— 哪一方的阿斗先被打光。
+/* 不设时间上限：一局只有一种结束方式 —— 哪一方的主公先被打光。
    出兵节奏：每 WAVE_GAP 秒一批，不管上一批走没走完；
    但如果某一方把这一波**提前清干净**了，立刻开下一波（两边一起开，不等另一边）。
    一批的兵力 = 7 + 波次（第 1 批 8 个、第 2 批 9 个、第 3 批 10 个……）。 */
@@ -2322,7 +2322,7 @@ function step(dt){
   G.time += dt;
   if (G.aiShield > 0) G.aiShield -= dt;
 
-  // 下半场出兵：曹军从下半场的敌军出生点下来打我方阿斗
+  // 下半场出兵：敌军从下半场的敌军出生点下来打我方主公
   if (G.spawnLeft > 0){
     G.spawnGap -= dt;
     if (G.spawnGap <= 0){
@@ -2331,7 +2331,7 @@ function step(dt){
       spawnWave('ai', G.spawnQueue.pop() || enemySpec(G.wave));
     }
   }
-  // 上半场出兵：汉军从上半场的敌军出生点上去打电脑的阿斗
+  // 上半场出兵：我军从上半场的敌军出生点上去打电脑的主公
   if (G.aiSpawnLeft > 0){
     G.aiSpawnGap -= dt;
     if (G.aiSpawnGap <= 0){
@@ -2362,7 +2362,7 @@ function step(dt){
     G.ai.merit -= G.ai.meritNeed;
     sendAttack('down', 3);
     G.fx.push({ type:'ring', x: W/2, y: MID2 + 10, r0:40, r1:200, t:0, dur:0.5, color:SEAL });
-    toast('电脑战功满 · 曹军突击队压境！');
+    toast('敌方战功满 · 突击队压境！');
     sfx('lost');
   }
 
@@ -2465,7 +2465,7 @@ function drawBoardBase(baseY, board, isEnemy){
   const cells = pathList(mine);
   const pts = pathPoints(mine);
   const adu = mine ? ADU_M : ADU_E;
-  const road = pts.concat([{ x: adu.x, y: adu.y }]);   // 路一直铺进阿斗那一格
+  const road = pts.concat([{ x: adu.x, y: adu.y }]);   // 路一直铺进主公那一格
 
   // ---- 路 ----
   ctx.save();
@@ -2490,7 +2490,7 @@ function drawBoardBase(baseY, board, isEnemy){
     for (let c = 0; c < COLS; c++){
       const idx = c + r*COLS;
       const x = BX + c*CELL, y = baseY + r*CELL;
-      // 阿斗那一格
+      // 主公那一格
       if (isAduCell(idx, mine)){
         ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.10)' : 'rgba(184,134,11,0.14)';
         rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
@@ -3055,7 +3055,7 @@ function withView(v, fn){
 const SEAM_Y = (MID1 + MID2) / 2;
 const inFoeHalf = y => y < SEAM_Y;
 
-/* 画一整块战场：底盘 + 守军 + 阿斗 + 路上的兵 + 特效 */
+/* 画一整块战场：底盘 + 守军 + 主公 + 路上的兵 + 特效 */
 function drawBoardIn(v, mine){
   withView(v, function(){
     const baseY = mine ? Y_MINE : Y_ENEMY;
@@ -3072,7 +3072,7 @@ function drawBoardIn(v, mine){
 }
 
 /* ---------------- 左上：战况面板 ----------------
-   双方馒头、第几波、本波剩余、阿斗命数、羁绊 —— 能读的都塞这儿。
+   双方馒头、第几波、本波剩余、主公命数、羁绊 —— 能读的都塞这儿。
    以后要加展示内容（商人倒计时、伤害统计……）也往这块里排。 */
 function drawInfoPanel(){
   const R = TOP_L;
@@ -3111,7 +3111,7 @@ function drawInfoPanel(){
   // ---- 两方数据小卡 ----
   const sides = [
     { mine:true,  label:'我方', color:GOLD, dim:'rgba(184,134,11,0.42)' },
-    { mine:false, label:'电脑', color:SEAL, dim:'rgba(176,58,46,0.40)' },
+    { mine:false, label:'敌方', color:SEAL, dim:'rgba(176,58,46,0.40)' },
   ];
   for (let i = 0; i < 2; i++){
     const s = sides[i];
@@ -3161,12 +3161,12 @@ function drawInfoPanel(){
                  mx + mw + 10, my + 4);
   }
 
-  // ---- 阿斗命数 ----
+  // ---- 主公命数 ----
   const ay = by + 314;
-  ctx.textAlign = 'left'; ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
-  ctx.fillText('阿斗', x0, ay);
+  ctx.textAlign = 'left'; ctx.font = '12px ' + FONT;
+  ctx.fillStyle = GOLD; ctx.fillText('主公', x0, ay);
   drawLifeRow(x0 + 46, ay, G.myLife, G.myMax, GOLD);
-  ctx.fillStyle = INK3; ctx.fillText('阿斗', x0 + 172, ay);
+  ctx.fillStyle = SEAL; ctx.fillText('主公', x0 + 172, ay);
   drawLifeRow(x0 + 218, ay, G.enLife, G.enMax, SEAL);
 
   // ---- 羁绊 / 被动 ----
@@ -3210,7 +3210,7 @@ function drawInfoPanel(){
     rr(ctx, b.x + 27, b.y + 14, 8, 22, 3); ctx.fill();
   }
 }
-/* 一行小红心（阿斗命数） */
+/* 一行小红心（主公命数） */
 function drawLifeRow(x, y, life, max, color){
   const n = Math.max(max, life);
   for (let i = 0; i < n; i++){
@@ -3260,7 +3260,7 @@ function drawEnemyPanel(){
   const cy = V_MINI.oy + bw + 30;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
-  ctx.fillText('曹军阿斗', R.x + 20, cy);
+  ctx.fillText('敌军主公', R.x + 20, cy);
   drawLifeRow(R.x + 82, cy, G.enLife, G.enMax, SEAL);
   let guard = boardCount(G.enBoard), out = 0;
   for (const m of G.marchers) if (m.owner === 'me') out++;
@@ -3278,7 +3278,7 @@ function drawEnemyBig(){
 
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillStyle = SEAL; ctx.font = 'bold 22px ' + FONT;
-  ctx.fillText('曹军战场', 34, 48);
+  ctx.fillText('敌军战场', 34, 48);
   ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
   ctx.fillText('只读 · 点单位看详情，点空白处收起', 34, 78);
 
@@ -3297,7 +3297,7 @@ function drawEnemyBig(){
   const cy = BIG_H - 56;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
-  ctx.fillText('曹军阿斗', 34, cy);
+  ctx.fillText('敌军主公', 34, cy);
   drawLifeRow(100, cy, G.enLife, G.enMax, SEAL);
   ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
   let out = 0; for (const m of G.marchers) if (m.owner === 'me') out++;
@@ -3307,7 +3307,7 @@ function drawEnemyBig(){
 }
 
 /* 路面上的兵：双方共用一套画法，靠颜色 + 箭头区分归属
-   金 = 我方出击兵（朝上打对面），红 = 来犯的兵（朝下打我的阿斗）
+   金 = 我方出击兵（朝上打对面），红 = 来犯的兵（朝下打我的主公）
    foeHalf：这一遍是画在「敌军视口」里还是「我方视口」里 —— 只画属于那一半的兵。 */
 function drawMarchers(v, foeHalf){
   for (const e of G.marchers){
@@ -3378,7 +3378,7 @@ function drawMarchers(v, foeHalf){
     ctx.restore();
   }
 }
-/* 阿斗现在是棋盘上的一格：格子里画一个阿斗，签与命数都收在这格里 */
+/* 主公现在是棋盘上的一格：格子里画一个主公，签与命数都收在这格里 */
 function drawAdu(pos, life, max, mine){
   const { x, y, r } = pos;
   const danger = life <= 1;
@@ -3399,16 +3399,20 @@ function drawAdu(pos, life, max, mine){
   ctx.fillStyle = g;
   ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
   ctx.strokeStyle = mine ? GOLD : SEAL; ctx.lineWidth = 2.5; ctx.stroke();
+  // 主公：「主公」两个字竖排在圆里，和名将卡的竖排字一个排法
   ctx.fillStyle = mine ? '#8a5a06' : SEAL;
-  ctx.font = Math.round(r*1.25) + 'px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('斗', x, y + 1);
+  const afs = Math.round(r * 0.92);
+  ctx.font = 'bold ' + afs + 'px ' + FONT;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('主', x, y - afs*0.52);
+  ctx.fillText('公', x, y + afs*0.52);
 
   // 阵营小签：贴在格子左上角
   ctx.fillStyle = mine ? GOLD : SEAL;
   rr(ctx, cellLeft + 5, cellTop + 5, 34, 16, 5); ctx.fill();
   ctx.fillStyle = '#fff8ec'; ctx.font = 'bold 11px ' + FONT;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(mine ? '我方' : '电脑', cellLeft + 22, cellTop + 14);
+  ctx.fillText(mine ? '我方' : '敌方', cellLeft + 22, cellTop + 14);
 
   // 命数红心：排在格子底部
   const n = Math.max(max, life);
@@ -3640,11 +3644,11 @@ function drawIntro(){
   ctx.fillText('1V1 上下分屏 · 双线对攻 · 文字塔防', W/2, py + 102);
 
   const lines = [
-    ['一', '两块战场', '上下各有一块 8×8 棋盘，各守一个阿斗；不设时间上限，哪边阿斗先被打光就输'],
+    ['一', '两块战场', '上下各有一块 8×8 棋盘，各守一个主公；不设时间上限，哪边主公先被打光就输'],
     ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局只有 5 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
     ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝沿自家路赶到出兵格后面、一格一个排好队（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
     ['四', '征兵', '开局 8 馒头；征一次 5 个，之后每征一次 +1，只涨不降（旧兵与铲子回收成馒头）；兵营里的单字会在征兵时自动换成 1 级兵，直接排上我方路'],
-    ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；阿斗每挨一击补 3'],
+    ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；主公每挨一击补 3'],
     ['六', '合成与成长', '同种同阶相叠升阶（1+1 → 2 阶）；两字相邻召将；名将杀敌攒经验自动升阶 —— 合成不是唯一的路'],
     ['七', '点击查看', '点棋盘上任意单位或手牌，都能看到攻击力、攻速、范围与移动速度（都按「格」算）'],
   ];
@@ -3788,16 +3792,16 @@ function drawOver(){
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
   ctx.fillStyle = win ? '#8a5a06' : SEAL;
   ctx.font = '46px ' + FONT;
-  ctx.fillText(win ? '杀 出 重 围' : '阿 斗 失 守', W/2, py + 80);
+  ctx.fillText(win ? '杀 出 重 围' : '主 公 失 守', W/2, py + 80);
   ctx.fillStyle = INK2; ctx.font = '16px ' + FONT;
-  ctx.fillText(win ? '曹军攻势溃散，幼主无恙' : '敌将破阵而入，长坂坡难守', W/2, py + 124);
+  ctx.fillText(win ? '敌军攻势溃散，主公无恙' : '敌将破阵而入，中军已破', W/2, py + 124);
 
   const rows = [
     ['坚守波次', G.wave + ' 波'],
     ['斩敌', G.kills + ' 骑'],
     ['漏过防线', G.leaks + ' 骑'],
-    ['我方阿斗余命', Math.max(0,G.myLife) + ' / ' + G.myMax],
-    ['敌方阿斗余命', Math.max(0,G.enLife) + ' / ' + G.enMax],
+    ['我方主公余命', Math.max(0,G.myLife) + ' / ' + G.myMax],
+    ['敌方主公余命', Math.max(0,G.enLife) + ' / ' + G.enMax],
     ['存活时长', Math.floor(G.time/60) + ':' + ('0' + Math.floor(G.time%60)).slice(-2)],
   ];
   for (let i = 0; i < rows.length; i++){
@@ -3838,7 +3842,7 @@ function drawPause(){
     ['第 ' + Math.max(G.wave,1) + ' 波', '波次'],
     [Math.floor(G.mantou) + '', '馒头'],
     [Math.floor(el/60) + ':' + ('0' + Math.floor(el%60)).slice(-2), '用时'],
-    [Math.max(0,G.myLife) + ' / ' + G.myMax, '阿斗'],
+    [Math.max(0,G.myLife) + ' / ' + G.myMax, '主公'],
   ];
   ctx.fillStyle = 'rgba(90,80,65,0.07)';
   rr(ctx, px + 34, py + 132, pw - 68, 54, 12); ctx.fill();
