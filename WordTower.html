@@ -753,7 +753,7 @@ function newGame(){
     passive:{},             // 被动道具
     actives:[],             // 主动道具槽
     shovelBonus:0,
-    shopT:44, shopOpen:false, shopStock:[],
+    shopBought:false, shopOpen:false, shopStock:[],
     dragger:null,
     inspect:null,           // 点击查看的兵种详情
     enemyBig:false,         // 敌军缩略图是否放大（只影响渲染与点击，不影响任何结算）
@@ -1343,6 +1343,10 @@ function startWave(early){
   toast('第 ' + n + ' 波 · 双方同时开战（' + lv + ' 阶兵）'
         + (early ? ' · 速清提前' : '')
         + (freed ? ' · 待命 ' + freed + ' 兵随军出击' : ''));
+
+  // 商人随偶数波而至（第 2/4/6… 波开波前出现），奇数波不来。
+  // 开店时 step 会整帧冻结，所以这一波实际上是从「买完之后」才开始出兵。
+  if (n % 2 === 0) openShop();
 }
 
 /* 一波里出什么兵：四个基础兵，权重从「刀枪为主」慢慢过渡到「四兵混编」。
@@ -2212,16 +2216,26 @@ function aiTick(dt){
 /* ============================================================
    神秘商人 / 道具
    ============================================================ */
+/* 神秘商人：随偶数波（2/4/6…）开场出现，一轮只准买 1 件。
+   买完立刻关店继续打，不买就点「不买了」走人。 */
+/* 下一个商人会在第几波来：最近的一个偶数波 */
+function nextShopWave(w){
+  let m = Math.max(1, w) + 1;
+  if (m % 2) m++;
+  return m;
+}
 function openShop(){
   aiShop();                 // 电脑同时逛自己的商店（各买各的）
   const pool = SHOP_POOL.slice();
   const stock = [];
   for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((Math.random()*pool.length)|0,1)[0]);
   G.shopStock = stock;
+  G.shopBought = false;
   G.phase = 'shop';
   sfx('buy');
 }
 function buyItem(id){
+  if (G.shopBought){ toast('本轮已购 1 件 · 下个商人再来'); sfx('hit'); return; }
   const it = ITEMS[id];
   if (G.mantou < it.cost){ toast('馒头不足'); sfx('hit'); return; }
   if (it.type === 'active' && G.actives.length >= 2){
@@ -2236,8 +2250,9 @@ function buyItem(id){
   }
   sfx('buy');
   toast('购得「' + it.name + '」');
+  G.shopBought = true;
   G.shopStock = G.shopStock.filter(x => x !== id);
-  if (!G.shopStock.length) G.phase = 'battle';
+  G.phase = 'battle';                    // 限购 1 件：买完即走
 }
 function closeShop(){ G.phase = 'battle'; }
 function useActive(slot){
@@ -2372,10 +2387,6 @@ function step(dt){
   }
 
   aiTick(dt);                 // 电脑征兵/布阵（与玩家的节奏一致）
-
-  // 商人
-  G.shopT -= dt;
-  if (G.shopT <= 0 && G.wave >= 2){ G.shopT = 44; openShop(); }
 
   updateFx(dt);
 }
@@ -3099,6 +3110,11 @@ function drawInfoPanel(){
     : ('下一波 ' + Math.ceil(Math.max(0, WAVE_GAP - G.waveT)) + 's');
   ctx.fillStyle = INK2; ctx.font = '14px ' + FONT;
   ctx.fillText(line2, x0, by + 74);
+  // 商人预告：偶数波开波前出现
+  ctx.textAlign = 'right';
+  ctx.fillStyle = 'rgba(176,58,46,0.80)'; ctx.font = '12px ' + FONT;
+  ctx.fillText('商人 第 ' + nextShopWave(wave) + ' 波', x1, by + 74);
+  ctx.textAlign = 'left';
   // 进度条：走满就开下一波（速清会提前，所以它会跳）
   const barW = x1 - x0, barY = by + 90;
   ctx.fillStyle = 'rgba(90,80,65,0.10)';
@@ -3745,7 +3761,7 @@ function drawShop(){
   ctx.fillStyle = '#8a5a06'; ctx.font = '34px ' + FONT;
   ctx.fillText('神 秘 商 人', W/2, py + 52);
   ctx.fillStyle = INK3; ctx.font = '14px ' + FONT;
-  ctx.fillText('主动道具最多带 2 件 · 当前馒头 ' + Math.floor(G.mantou), W/2, py + 86);
+  ctx.fillText('本轮限购 1 件 · 主动最多 2 件 · 馒头 ' + Math.floor(G.mantou), W/2, py + 86);
 
   G._shopBtns = [];
   for (let i = 0; i < 3; i++){
@@ -4232,7 +4248,7 @@ function boot(){
 window.__api = {
   newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
-  castSkill, openShop, closeShop, endGame, recycleValue,
+  castSkill, openShop, closeShop, nextShopWave, endGame, recycleValue,
   setPaused, togglePause, pauseAction, canPause, BTN_PAUSE,
   aiTick, aiEnlist, aiPlace, sendAttack, pickHeroChar, pickHeroCharAI, rollTile, aiRollTile, sendCharToRoad, sendTileToRoad, freeRoadSlots, enlistSide, moneyOf, addMoney,
   HERO_CHAR_POOL0, drawPoolChar, takePoolChar, refillPool,
