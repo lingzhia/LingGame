@@ -3141,7 +3141,7 @@ function drawBoardIn(v, mine){
     drawAdu(mine ? ADU_M : ADU_E,
             mine ? G.myLife : G.enLife,
             mine ? G.myMax  : G.enMax, mine);
-    drawInspectMark(mine ? 'my' : 'ai');
+    drawInspectMark(mine);              // 注意传布尔：drawInspectMark 内部按布尔比对
     drawMarchers(v, !mine);
     drawFx(v, !mine);
   });
