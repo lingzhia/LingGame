@@ -31,8 +31,11 @@
         征兵一次刷新 5 格（旧牌自动回收） / 馒头只来自杀敌 /
         同字升阶 / 12 名将拼名召唤 / 羁绊 /
         神秘商人道具 / 白绿蓝紫金五品
-   版式：竖屏 720×1446（两块棋盘上下叠放，16 行格子的天生瘦长比例）·
-        格子 72、HUD / 中缝 / 手牌 / 按钮全部压紧，左右留白用阵营标签填住
+   版式：竖屏 720×1446，分上中下三段 ——
+        上 1/3 左半是战况面板（馒头/波次/阿斗/羁绊），右半是敌军缩略图（点一下放大到上 2/3，再点收起）；
+        下 2/3 是玩家操作区：我方棋盘按 1.16 倍渲染 + 兵营 + 按键。
+        世界坐标（两块 8×8 棋盘、格距 72、上下镜像）一个字没动，
+        缩放只是「怎么画」，射程/行军/命中全在世界坐标里算，上下依旧完全对称。
    ============================================================ */
 
 /* ---------------- 画布 ---------------- */
@@ -245,12 +248,57 @@ function aiCombOK(comb){
   return !!AI_FUSE || !(comb && comb.kind === 'unit' && !!FUSE[comb.type]);
 }
 
-const HAND_N = 5, HAND_S = 78, HAND_GAP = 8, HAND_Y = 1280;
-const HAND_X0 = (W - (HAND_N * HAND_S + (HAND_N - 1) * HAND_GAP)) / 2; // 149
-const BTN_ENLIST = { x: 130, y: 1382, w: 226, h: 56 };
-const SLOT = [{ x: 378, y: 1382 }, { x: 450, y: 1382 }];
+/* ---------------- 版式：上中下三段 ----------------
+   上 1/3 再横着切一半：
+     左半 = 战况面板（馒头 / 波次 / 阿斗 / 羁绊，能读的都放这儿）
+     右半 = 敌军缩略图（只读，点一下放大到上 2/3，再点收起）
+   下 2/3 = 玩家操作区：我方棋盘（放大 1.16 倍渲染）+ 兵营 + 按键。
+   世界坐标一个字没动 —— 两块棋盘还是同样大小、同样格距，
+   变的是「怎么把世界画到屏幕上」：每个视口一套 ox/oy/k，
+   逻辑（射程、行军、命中）全在世界坐标里算，所以上下依旧完全对称。 */
+const TOP_H = Math.round(H / 3);          // 482
+const BOT_Y = TOP_H;                      // 482
+const BIG_H = Math.round(H * 2 / 3);      // 964（敌军放大后盖住上 2/3）
+const TOP_L = { x: 0, y: 0, w: W/2, h: TOP_H };
+const TOP_R = { x: W/2, y: 0, w: W/2, h: TOP_H };
+const PLAY_S = 1.16;                      // 我方棋盘的渲染倍率（世界 576 → 668）
+const MINI_K = 0.58;                      // 敌军缩略图倍率（世界 576 → 334）
+const BIG_K  = 1.10;                      // 敌军放大后的倍率
+
+const HAND_N = 5, HAND_S = 86, HAND_GAP = 8, HAND_Y = 1188;
+const HAND_X0 = (W - (HAND_N * HAND_S + (HAND_N - 1) * HAND_GAP)) / 2; // 129
+const BTN_ENLIST = { x: 24, y: 1296, w: 236, h: 58 };
+const SLOT = [{ x: 276, y: 1297 }, { x: 344, y: 1297 }];
 const SLOT_S = 56;
-const BTN_PAUSE = { x: W - 62, y: 12, w: 52, h: 52 };   // 右上角
+const BTN_PAUSE = { x: TOP_L.w - 68, y: 16, w: 50, h: 50 };   // 战况面板右上角
+const BTN_FOLD = { x: W - 96, y: 26, w: 74, h: 44 };           // 放大视图里的「收起」
+
+/* 视口：矩形（屏幕裁剪区）+ 缩放 k + 世界原点 wy0 落在屏幕的哪个 y。
+   横向一律居中，所以只给 oy。 */
+function mkView(rect, k, wy0, oy){
+  const bw = COLS * CELL * k;
+  return { k, wy0, ox: rect.x + (rect.w - bw)/2, oy,
+           clip: { x: rect.x, y: rect.y, w: rect.w, h: rect.h } };
+}
+const V_MINI = mkView(TOP_R,          MINI_K, Y_ENEMY, 56);    // 敌军缩略图
+const V_BIG  = mkView({ x:0, y:0, w:W, h:BIG_H }, BIG_K, Y_ENEMY, 168);  // 敌军放大
+const V_PLAY = mkView({ x:0, y:BOT_Y, w:W, h:H-BOT_Y }, PLAY_S, Y_MINE, 496); // 我方棋盘
+
+/* 屏幕点 -> 世界坐标（视口内） */
+function viewPt(v, wx, wy){
+  return { x: v.ox + (wx - BX) * v.k, y: v.oy + (wy - v.wy0) * v.k };
+}
+/* 世界坐标 -> 屏幕坐标（视口内） */
+function viewWorld(v, p){
+  return { x: BX + (p.x - v.ox) / v.k, y: v.wy0 + (p.y - v.oy) / v.k };
+}
+/* 某一格在屏幕上的矩形（拖拽高亮 / 落点提示用） */
+function cellRectV(v, idx){
+  const p = viewPt(v, BX + colOf(idx)*CELL, v.wy0 + rowOf(idx)*CELL);
+  const s = CELL * v.k;
+  return { x: p.x, y: p.y, s };
+}
+const bigOpen = () => !!G.enemyBig;
 
 /* ---------------- 配色 ---------------- */
 const PAPER   = '#f2ebdd';
@@ -707,6 +755,7 @@ function newGame(){
     shopT:44, shopOpen:false, shopStock:[],
     dragger:null,
     inspect:null,           // 点击查看的兵种详情
+    enemyBig:false,         // 敌军缩略图是否放大（只影响渲染与点击，不影响任何结算）
     toast:'', toastT:0,
     result:null,
     bondOn:{},
@@ -2369,12 +2418,20 @@ function drawBg(){
     ctx.fillStyle = rg; ctx.fillRect(x-180, y-180, 360, 360);
   }
   ctx.restore();
-  // 中缝
-  ctx.fillStyle = 'rgba(150,135,110,0.10)';
-  ctx.fillRect(0, MID1, W, MID2-MID1);
-  ctx.strokeStyle = 'rgba(120,105,80,0.28)'; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(0,MID1+.5); ctx.lineTo(W,MID1+.5); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0,MID2-.5); ctx.lineTo(W,MID2-.5); ctx.stroke();
+
+  // 上区（战况 + 敌军）压一层浅纸，与下半场的战场分开
+  ctx.fillStyle = 'rgba(255,255,255,0.30)';
+  ctx.fillRect(0, 0, W, TOP_H);
+  // 上下分界：一道细线 + 中间一点留白
+  ctx.strokeStyle = 'rgba(120,105,80,0.26)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, TOP_H - 0.5); ctx.lineTo(W, TOP_H - 0.5); ctx.stroke();
+  // 左面板与敌军图之间也来一道
+  ctx.strokeStyle = 'rgba(120,105,80,0.18)';
+  ctx.beginPath(); ctx.moveTo(W/2 - 0.5, 14); ctx.lineTo(W/2 - 0.5, TOP_H - 14); ctx.stroke();
+
+  // 我方战场的底：一块浅浅的暖色台面，棋盘坐上去
+  ctx.fillStyle = 'rgba(255,255,255,0.22)';
+  rr(ctx, 10, BOT_Y + 8, W - 20, (H - BOT_Y) - 16, 18); ctx.fill();
 }
 
 /* 路上的行进方向小箭头 */
@@ -2767,11 +2824,28 @@ function closeInspect(){ G.inspect = null; }
 const VS_NAME = {};
 for (const k in UNITS) VS_NAME[k] = UNITS[k].name;
 for (const k in FUSE)  VS_NAME[k] = FUSE[k].name;
-function drawInspect(){
+/* 被点中的东西现在画在屏幕的哪个 y（决定详情面板挂上还是挂下） */
+function insScreenY(ins){
+  if (ins.side === 'hand') return HAND_Y;
+  const foeV = G.enemyBig ? V_BIG : V_MINI;
+  const v = (ins.side === 'my') ? V_PLAY
+          : (ins.side === 'ai') ? foeV
+          : (inFoeHalf(ins.py) ? foeV : V_PLAY);
+  return viewPt(v, ins.px, ins.py).y;
+}
+
+/* 详情标记（范围圈 / 名将两格）：画在它所属的那个视口里，跟着世界坐标走 */
+function drawInspectMark(viewMine){
   const ins = G.inspect;
   if (!ins) return;
+  const targetMine = (ins.side === 'my') ? true
+                   : (ins.side === 'ai') ? false
+                   : (ins.side === 'foe') ? !inFoeHalf(ins.py)
+                   : null;                       // 手牌没有棋盘位置
+  if (targetMine !== viewMine) return;
+
   // ---- 攻击范围圈 ----
-  if ((ins.side === 'my' || ins.side === 'ai' || ins.side === 'foe') && ins.range > 0){
+  if (ins.range > 0){
     const my = ins.side === 'my';
     ctx.save();
     ctx.fillStyle = my ? 'rgba(184,134,11,0.10)' : 'rgba(176,58,46,0.10)';
@@ -2796,15 +2870,24 @@ function drawInspect(){
       ctx.restore();
     }
   }
+}
+
+function drawInspectPanel(){
+  const ins = G.inspect;
+  if (!ins) return;
 
   // ---- 面板 ----
   // 我方棋盘上的守军多一行「脱战回血」说明，所以面板要加高一点
   const isMine = ins.side === 'my' && !!ins.kind && ins.kind !== 'char';
   const w = 384, h = isMine ? 214 : 192;
   const x = (W - w)/2;
-  // 点自己这边（含手牌）固定挂在上方，点对面固定挂在下方；下方那处要避开底部的兵营区
-  const y = (ins.side === 'my' || ins.side === 'hand' || ins.side === 'foe' && ins.py > H/2)
-              ? 88 : (HAND_Y - 32 - h);
+  // 面板永远摆在「看不见被点单位」的那一侧：
+  //   目标在下半场靠上 -> 面板贴兵营；靠下 -> 面板挂到操作区顶上。
+  //   敌军的单位在上区，范围圈画在缩略图里，面板就落到操作区顶部（不挡缩略图）。
+  const ty = insScreenY(ins);
+  const y = (ty < BOT_Y) ? (BOT_Y + 14)
+          : (ty < (BOT_Y + HAND_Y) / 2) ? (HAND_Y - 26 - h)
+          : (BOT_Y + 14);
   ctx.save();
   ctx.fillStyle = 'rgba(28,26,23,0.18)';
   rr(ctx, x + 2, y + 4, w, h, 16); ctx.fill();
@@ -2948,94 +3031,318 @@ function drawUnitsOnBoard(baseY, board, isEnemy){
   }
 }
 
-/* 双方的出兵点都在各自棋盘上、正对中缝的那一格：中缝里画两个相对而指的箭头 */
-function drawGates(){
-  const cy = (MID1 + MID2) / 2;
-  const sM = spawnPos(true), sE = spawnPos(false);
-  gateArrow(sE.x, cy - 7, -1, GOLD);    // 向上：电脑棋盘里的出兵点
-  gateArrow(sM.x, cy + 7, 1, SEAL);     // 向下：我方棋盘里的出兵点
-  // 中缝只有 20px 高，提示条弹出时会盖住这行小字，所以有提示条时先让位
-  if (G.toastT > 0) return;
-  ctx.fillStyle = 'rgba(90,80,65,0.45)'; ctx.font = '11px ' + FONT;
-  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText('中缝 · 双方的出兵点都是棋盘上的一格', BX + 4, cy);
-}
-function gateArrow(x, y, dir, color){
+/* ============================================================
+   视口：把 720×1446 的世界「怎么画到屏幕上」
+   ------------------------------------------------------------
+   世界坐标一个字没动（两块棋盘各 8×8、格距 72、上下严格镜像），
+   变的是每个视口的 ox/oy/k —— 渲染才有的东西。
+   好处：射程、行军距离、命中判定全在世界坐标里算，
+   所以「上半场缩小」不会让电脑的兵变弱或变强，规则依旧完全对称。
+   ============================================================ */
+function withView(v, fn){
   ctx.save();
-  ctx.globalAlpha = 0.55;
-  ctx.fillStyle = color;
+  ctx.setTransform(SCALE*DPR, 0, 0, SCALE*DPR, 0, 0);
   ctx.beginPath();
-  ctx.moveTo(x, y + dir*13);
-  ctx.lineTo(x - 8, y - dir*2);
-  ctx.lineTo(x + 8, y - dir*2);
-  ctx.closePath(); ctx.fill();
-  ctx.globalAlpha = 0.30;
-  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
-  ctx.setLineDash([4,4]);
-  ctx.beginPath();
-  ctx.moveTo(x - 34, y); ctx.lineTo(x + 34, y);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.rect(v.clip.x, v.clip.y, v.clip.w, v.clip.h);
+  ctx.clip();
+  ctx.translate(v.ox - BX*v.k, v.oy - v.wy0*v.k);
+  ctx.scale(v.k, v.k);
+  fn();
   ctx.restore();
+}
+/* 中缝：世界坐标里两半的分界线，画面上不再是一条缝，
+   但「兵过没过缝」还是按它算（决定这颗兵画在哪个视口） */
+const SEAM_Y = (MID1 + MID2) / 2;
+const inFoeHalf = y => y < SEAM_Y;
+
+/* 画一整块战场：底盘 + 守军 + 阿斗 + 路上的兵 + 特效 */
+function drawBoardIn(v, mine){
+  withView(v, function(){
+    const baseY = mine ? Y_MINE : Y_ENEMY;
+    const board = mine ? G.board : G.enBoard;
+    drawBoardBase(baseY, board, !mine);
+    drawUnitsOnBoard(baseY, board, !mine);
+    drawAdu(mine ? ADU_M : ADU_E,
+            mine ? G.myLife : G.enLife,
+            mine ? G.myMax  : G.enMax, mine);
+    drawInspectMark(mine ? 'my' : 'ai');
+    drawMarchers(v, !mine);
+    drawFx(v, !mine);
+  });
 }
 
-/* 两侧留白上的阵营标签：竖排两个大字。
-   棋盘只占画布中间的 8 列，左右各 72px 的留白靠它填住，
-   整幅画面才是「一块完整的战场」而不是一条窄带。 */
-function drawSideTags(){
-  const tags = [
-    { baseY: Y_ENEMY, txt: '曹军', color: SEAL },
-    { baseY: Y_MINE,  txt: '汉军', color: GOLD },
-  ];
-  ctx.save();
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  for (const side of [0, 1]){
-    const cx = side ? W - BX/2 : BX/2;
-    for (const t of tags){
-      const cy = t.baseY + ROWS*CELL/2;
-      ctx.globalAlpha = 0.30;
-      ctx.fillStyle = t.color; ctx.font = '19px ' + FONT;
-      ctx.fillText(t.txt[0], cx, cy - 14);
-      ctx.fillText(t.txt[1], cx, cy + 14);
-      // 标签上下各一道小短线，像一张竖着的木牌
-      ctx.globalAlpha = 0.18;
-      ctx.fillRect(cx - 9, cy - 40, 18, 1.5);
-      ctx.fillRect(cx - 9, cy + 40, 18, 1.5);
-    }
+/* ---------------- 左上：战况面板 ----------------
+   双方馒头、第几波、本波剩余、阿斗命数、羁绊 —— 能读的都塞这儿。
+   以后要加展示内容（商人倒计时、伤害统计……）也往这块里排。 */
+function drawInfoPanel(){
+  const R = TOP_L;
+  const bx = 10, by = 10, bw = R.w - 20, bh = R.h - 20;   // 340 × 462
+  ctx.fillStyle = 'rgba(255,255,255,0.62)';
+  rr(ctx, bx, by, bw, bh, 16); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.18)'; ctx.lineWidth = 1;
+  rr(ctx, bx, by, bw, bh, 16); ctx.stroke();
+
+  const x0 = bx + 16, x1 = bx + bw - 16;      // 26 .. 334
+  const wave = Math.max(G.wave, 1);
+
+  // ---- 标题：第几波 + 兵阶 ----
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK; ctx.font = 'bold 26px ' + FONT;
+  ctx.fillText('第 ' + wave + ' 波', x0, by + 34);
+  ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+  ctx.fillText(waveTier(wave) + ' 阶兵', x0 + 88, by + 38);
+
+  // ---- 下一波倒计时 ----
+  const line2 = (G.phase === 'prep')
+    ? ('备战 ' + Math.ceil(Math.max(0, G.prepT)) + 's')
+    : ('下一波 ' + Math.ceil(Math.max(0, WAVE_GAP - G.waveT)) + 's');
+  ctx.fillStyle = INK2; ctx.font = '14px ' + FONT;
+  ctx.fillText(line2, x0, by + 74);
+  // 进度条：走满就开下一波（速清会提前，所以它会跳）
+  const barW = x1 - x0, barY = by + 90;
+  ctx.fillStyle = 'rgba(90,80,65,0.10)';
+  rr(ctx, x0, barY, barW, 6, 3); ctx.fill();
+  const prog = (G.phase === 'prep') ? 0 : clamp(G.waveT / WAVE_GAP, 0, 1);
+  if (prog > 0){
+    ctx.fillStyle = 'rgba(176,58,46,0.55)';
+    rr(ctx, x0, barY, Math.max(4, barW*prog), 6, 3); ctx.fill();
   }
-  ctx.restore();
+
+  // ---- 两方数据小卡 ----
+  const sides = [
+    { mine:true,  label:'我方', color:GOLD, dim:'rgba(184,134,11,0.42)' },
+    { mine:false, label:'电脑', color:SEAL, dim:'rgba(176,58,46,0.40)' },
+  ];
+  for (let i = 0; i < 2; i++){
+    const s = sides[i];
+    const cardY = by + 112 + i*92;
+    ctx.fillStyle = 'rgba(90,80,65,0.05)';
+    rr(ctx, x0, cardY, x1 - x0, 84, 12); ctx.fill();
+
+    const ly = cardY + 24;
+    // 阵营
+    ctx.fillStyle = s.color;
+    ctx.beginPath(); ctx.arc(x0 + 14, ly, 5.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = INK2; ctx.font = 'bold 15px ' + FONT;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(s.label, x0 + 26, ly + 1);
+    // 馒头
+    ctx.fillStyle = '#d9a02b';
+    ctx.beginPath(); ctx.arc(x0 + 82, ly, 9, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#8a5a06'; ctx.font = '10px ' + FONT; ctx.textAlign = 'center';
+    ctx.fillText('馒', x0 + 82, ly + 1);
+    ctx.fillStyle = INK; ctx.font = 'bold 20px ' + FONT; ctx.textAlign = 'left';
+    ctx.fillText(String(Math.floor(moneyOf(s.mine))), x0 + 96, ly + 1);
+    // 守军 / 出击
+    const guard = boardCount(s.mine ? G.board : G.enBoard);
+    let out = 0;
+    for (const m of G.marchers) if (m.owner === (s.mine ? 'me' : 'ai')) out++;
+    ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+    ctx.fillText('守 ' + guard + ' · 出击 ' + out, x0 + 150, ly + 2);
+    // 本波剩余
+    const left = s.mine ? G.spawnLeft : G.aiSpawnLeft;
+    ctx.textAlign = 'right';
+    ctx.fillStyle = left > 0 ? SEAL : INK3;
+    ctx.fillText('本波余 ' + left, x1 - 12, ly + 2);
+
+    // 战功条
+    const merit = s.mine ? G.merit : G.ai.merit;
+    const need = s.mine ? G.meritNeed : G.ai.meritNeed;
+    const mp = clamp(merit / need, 0, 1);
+    const mw = 150, mh = 7, mx = x0 + 12, my = cardY + 52;
+    ctx.fillStyle = 'rgba(90,80,65,0.12)';
+    rr(ctx, mx, my, mw, mh, 4); ctx.fill();
+    if (mp > 0){
+      ctx.fillStyle = mp >= 1 ? s.color : s.dim;
+      rr(ctx, mx, my, Math.max(5, mw*mp), mh, 4); ctx.fill();
+    }
+    ctx.textAlign = 'left'; ctx.fillStyle = INK3; ctx.font = '11px ' + FONT;
+    ctx.fillText('战功 ' + Math.floor(merit) + '/' + need + (mp >= 1 ? ' · 突击队出阵' : ''),
+                 mx + mw + 10, my + 4);
+  }
+
+  // ---- 阿斗命数 ----
+  const ay = by + 314;
+  ctx.textAlign = 'left'; ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+  ctx.fillText('阿斗', x0, ay);
+  drawLifeRow(x0 + 46, ay, G.myLife, G.myMax, GOLD);
+  ctx.fillStyle = INK3; ctx.fillText('阿斗', x0 + 172, ay);
+  drawLifeRow(x0 + 218, ay, G.enLife, G.enMax, SEAL);
+
+  // ---- 羁绊 / 被动 ----
+  const bs = [];
+  for (const b of BONDS) if (G.bondOn[b.id]) bs.push(b.name);
+  const ps = [];
+  for (const k in G.passive) if (G.passive[k]) ps.push(ITEMS[k].icon);
+  ctx.textAlign = 'left';
+  if (bs.length || ps.length){
+    ctx.fillStyle = '#8a5a06'; ctx.font = '13px ' + FONT;
+    if (bs.length) ctx.fillText('羁绊 · ' + bs.join(' / '), x0, by + 352);
+    if (ps.length){
+      ctx.fillStyle = INK2;
+      ctx.fillText('被动 · ' + ps.join(' '), x0, by + (bs.length ? 376 : 352));
+    }
+  } else {
+    ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+    ctx.fillText('馒头只从杀敌里来 · 征兵费只涨不降', x0, by + 352);
+  }
+  if (G.aduShield > 0){
+    ctx.fillStyle = GOLD; ctx.font = 'bold 14px ' + FONT;
+    ctx.fillText('神兵符 无敌 ' + G.aduShield.toFixed(1) + 's', x0, by + 400);
+  }
+
+  // ---- 底部提示 ----
+  ctx.fillStyle = 'rgba(90,80,65,0.42)'; ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('点右侧敌军缩略图 → 放大查看', x0, by + bh - 22);
+
+  // ---- 暂停按钮 ----
+  if (canPause()){
+    const b = BTN_PAUSE;
+    ctx.fillStyle = 'rgba(70,60,45,0.14)';
+    rr(ctx, b.x + 1, b.y + 2, b.w, b.h, 14); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.90)';
+    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(90,80,65,0.26)'; ctx.lineWidth = 1.5;
+    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.stroke();
+    ctx.fillStyle = INK2;
+    rr(ctx, b.x + 15, b.y + 14, 8, 22, 3); ctx.fill();
+    rr(ctx, b.x + 27, b.y + 14, 8, 22, 3); ctx.fill();
+  }
+}
+/* 一行小红心（阿斗命数） */
+function drawLifeRow(x, y, life, max, color){
+  const n = Math.max(max, life);
+  for (let i = 0; i < n; i++){
+    const on = i < life;
+    ctx.save();
+    ctx.translate(x + i*17, y); ctx.scale(0.95, 0.95);
+    ctx.beginPath();
+    ctx.moveTo(0, 5);
+    ctx.bezierCurveTo(-9, -3, -3, -11, 0, -6);
+    ctx.bezierCurveTo(3, -11, 9, -3, 0, 5);
+    ctx.closePath();
+    ctx.fillStyle = on ? color : 'rgba(120,105,80,0.18)';
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle = life > 0 ? INK2 : SEAL; ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText(life + '/' + max, x + n*17 + 2, y);
+}
+
+/* ---------------- 右上：敌军缩略图 ---------------- */
+function drawEnemyPanel(){
+  const R = TOP_R;
+  const k = V_MINI.k, bw = COLS*CELL*k;
+  // 标题
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = SEAL; ctx.font = 'bold 15px ' + FONT;
+  ctx.fillText('敌军战场', R.x + 20, 30);
+  ctx.fillStyle = INK3; ctx.font = '11px ' + FONT;
+  ctx.fillText('只读 · 点一下放大', R.x + 96, 31);
+
+  // 缩略图底板
+  ctx.fillStyle = 'rgba(176,58,46,0.045)';
+  rr(ctx, V_MINI.ox - 8, V_MINI.oy - 8, bw + 16, bw + 16, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(176,58,46,0.26)'; ctx.lineWidth = 1.5;
+  rr(ctx, V_MINI.ox - 8, V_MINI.oy - 8, bw + 16, bw + 16, 12); ctx.stroke();
+  drawBoardIn(V_MINI, false);
+
+  // 放大提示：右下角一个小箭头
+  const ax = V_MINI.ox + bw - 14, ay = V_MINI.oy + bw - 14;
+  ctx.fillStyle = 'rgba(176,58,46,0.55)';
+  ctx.beginPath();
+  ctx.moveTo(ax + 8, ay + 8); ctx.lineTo(ax - 8, ay + 8); ctx.lineTo(ax + 8, ay - 8);
+  ctx.closePath(); ctx.fill();
+
+  // 底部战况
+  const cy = V_MINI.oy + bw + 30;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+  ctx.fillText('曹军阿斗', R.x + 20, cy);
+  drawLifeRow(R.x + 82, cy, G.enLife, G.enMax, SEAL);
+  let guard = boardCount(G.enBoard), out = 0;
+  for (const m of G.marchers) if (m.owner === 'me') out++;
+  ctx.fillStyle = INK3; ctx.font = '12px ' + FONT; ctx.textAlign = 'right';
+  ctx.fillText('守 ' + guard + ' · 我军出击 ' + out, R.x + R.w - 20, cy);
+}
+
+/* ---------------- 敌军放大视图（盖住上 2/3） ---------------- */
+function drawEnemyBig(){
+  ctx.fillStyle = 'rgba(28,26,23,0.60)'; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = PAPER_L;
+  rr(ctx, 6, 6, W - 12, BIG_H - 12, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(176,58,46,0.45)'; ctx.lineWidth = 2;
+  rr(ctx, 6, 6, W - 12, BIG_H - 12, 18); ctx.stroke();
+
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = SEAL; ctx.font = 'bold 22px ' + FONT;
+  ctx.fillText('曹军战场', 34, 48);
+  ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+  ctx.fillText('只读 · 点单位看详情，点空白处收起', 34, 78);
+
+  // 收起按钮
+  const b = BTN_FOLD;
+  ctx.fillStyle = 'rgba(176,58,46,0.10)';
+  rr(ctx, b.x, b.y, b.w, b.h, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(176,58,46,0.40)'; ctx.lineWidth = 1.5;
+  rr(ctx, b.x, b.y, b.w, b.h, 12); ctx.stroke();
+  ctx.fillStyle = SEAL; ctx.font = '14px ' + FONT; ctx.textAlign = 'center';
+  ctx.fillText('收 起', b.x + b.w/2, b.y + b.h/2 + 1);
+
+  drawBoardIn(V_BIG, false);
+
+  // 底部战况
+  const cy = BIG_H - 56;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
+  ctx.fillText('曹军阿斗', 34, cy);
+  drawLifeRow(100, cy, G.enLife, G.enMax, SEAL);
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
+  let out = 0; for (const m of G.marchers) if (m.owner === 'me') out++;
+  ctx.fillText('守军 ' + boardCount(G.enBoard) + ' · 我军出击 ' + out, 260, cy);
+  ctx.textAlign = 'right';
+  ctx.fillText('馒头 ' + Math.floor(G.ai.mantou), W - 34, cy);
 }
 
 /* 路面上的兵：双方共用一套画法，靠颜色 + 箭头区分归属
-   金 = 我方出击兵（朝上打对面），红 = 来犯的兵（朝下打我的阿斗） */
-function drawMarchers(){
+   金 = 我方出击兵（朝上打对面），红 = 来犯的兵（朝下打我的阿斗）
+   foeHalf：这一遍是画在「敌军视口」里还是「我方视口」里 —— 只画属于那一半的兵。 */
+function drawMarchers(v, foeHalf){
   for (const e of G.marchers){
+    if (inFoeHalf(e.y) !== foeHalf) continue;
+    // 过缝：挨着中缝的 36px 内淡出/淡入。两块战场在屏幕上不再相连，
+    // 不加这一下，兵会从这块盘子的边上「凭空消失 / 凭空出现」。
+    const fade = clamp((foeHalf ? SEAM_Y - e.y : e.y - SEAM_Y) / 36, 0, 1);
+    if (fade <= 0.02) continue;
     const mine = e.owner === 'me';
     const s = e.w;
     const edge = mine ? GOLD : SEAL;
     const ink  = mine ? '#8a5a06' : SEAL;
     ctx.save();
+    ctx.globalAlpha = fade;
     ctx.translate(e.x + (e.jit || 0), e.y + (e.jit || 0)*0.45);
     ctx.fillStyle = 'rgba(70,60,45,0.18)';
     ctx.beginPath(); ctx.ellipse(0, s*0.42, s*0.46, s*0.16, 0, 0, Math.PI*2); ctx.fill();
     // 前进方向的小三角：我方朝上，敌方朝下；列队待命时改成虚线圈 + 一个「待」字
     if (e.queued){
-      ctx.strokeStyle = edge; ctx.globalAlpha = 0.55;
+      ctx.strokeStyle = edge; ctx.globalAlpha = fade*0.55;
       ctx.setLineDash([4,4]); ctx.lineWidth = 1.6;
       ctx.beginPath(); ctx.arc(0, 0, s*0.62, 0, Math.PI*2); ctx.stroke();
       ctx.setLineDash([]);
-      ctx.globalAlpha = 0.8; ctx.fillStyle = edge;
+      ctx.globalAlpha = fade*0.8; ctx.fillStyle = edge;
       ctx.font = Math.round(s*0.32) + 'px ' + FONT;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('待', 0, s*0.74);
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = fade;
     } else {
-      ctx.fillStyle = edge; ctx.globalAlpha = 0.5;
+      ctx.fillStyle = edge; ctx.globalAlpha = fade*0.5;
       const ay = mine ? -s*0.66 : s*0.66;
       ctx.beginPath();
       ctx.moveTo(0, ay + (mine ? -6 : 6)); ctx.lineTo(-4.5, ay); ctx.lineTo(4.5, ay);
       ctx.closePath(); ctx.fill();
-      ctx.globalAlpha = 1;
+      ctx.globalAlpha = fade;
     }
     ctx.fillStyle = e.hurt > 0.35 ? (mine ? '#f0e2c4' : '#e8c9c4') : (mine ? '#fdf3d6' : '#faeae7');
     ctx.beginPath(); ctx.arc(0, 0, s*0.5, 0, Math.PI*2); ctx.fill();
@@ -3127,85 +3434,12 @@ function drawAdu(pos, life, max, mine){
   }
 }
 
-function drawHUD(){
-  // 左上：双方的对战面板（上=电脑，下=我方），一眼看出是两个玩家在打
-  const px = 14, py = 10, pw = 300, ph = 64;
-  ctx.fillStyle = 'rgba(255,255,255,0.76)';
-  rr(ctx, px, py, pw, ph, 12); ctx.fill();
-  ctx.strokeStyle = 'rgba(90,80,65,0.20)'; ctx.lineWidth = 1; ctx.stroke();
-
-  const rows = [
-    { label:'电脑', color:SEAL, dim:'rgba(176,58,46,0.40)', mantou:G.ai.mantou, merit:G.ai.merit },
-    { label:'我方', color:GOLD, dim:'rgba(184,134,11,0.42)', mantou:G.mantou, merit:G.merit },
-  ];
-  for (let i = 0; i < 2; i++){
-    const r = rows[i], cy = py + 18 + i*30;
-    // 阵营色点
-    ctx.fillStyle = r.color;
-    ctx.beginPath(); ctx.arc(px + 16, cy, 5.5, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = INK2; ctx.font = '13px ' + FONT;
-    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText(r.label, px + 27, cy + 1);
-    // 馒头
-    ctx.fillStyle = '#d9a02b';
-    ctx.beginPath(); ctx.arc(px + 68, cy, 8, 0, Math.PI*2); ctx.fill();
-    ctx.fillStyle = '#8a5a06'; ctx.font = '10px ' + FONT; ctx.textAlign = 'center';
-    ctx.fillText('馒', px + 68, cy + 1);
-    ctx.fillStyle = INK; ctx.font = 'bold 16px ' + FONT; ctx.textAlign = 'left';
-    ctx.fillText(Math.floor(r.mantou), px + 81, cy + 1);
-    // 战功条
-    const bx = px + 162, bw = pw - 162 - 12, bh = 12;
-    const mp = clamp(r.merit / G.meritNeed, 0, 1);
-    ctx.fillStyle = 'rgba(90,80,65,0.10)';
-    rr(ctx, bx, cy - bh/2, bw, bh, 6); ctx.fill();
-    if (mp > 0){
-      ctx.fillStyle = mp >= 1 ? r.color : r.dim;
-      rr(ctx, bx + 1, cy - bh/2 + 1, Math.max(6, (bw - 2) * mp), bh - 2, 5); ctx.fill();
-    }
-    ctx.fillStyle = mp >= 1 ? '#fff8ec' : INK3;
-    ctx.font = '10px ' + FONT; ctx.textAlign = 'center';
-    ctx.fillText('战功 ' + Math.floor(r.merit) + '/' + G.meritNeed, bx + bw/2, cy + 1);
-  }
-
-  // 右上：波次 / 时间
-  ctx.fillStyle = 'rgba(255,255,255,0.72)';
-  rr(ctx, W-204, 10, 132, 60, 12); ctx.fill();
-  ctx.strokeStyle = 'rgba(90,80,65,0.22)'; ctx.lineWidth = 1; ctx.stroke();
-  ctx.fillStyle = INK; ctx.font = 'bold 17px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('第 ' + Math.max(G.wave,1) + ' 波', W-138, 30);
-  // 第二行：下一波还有多久（任一方速清会提前开波，所以这个数字会跳）
-  // 总用时在结算面板里另有「存活时长」，这里换成更该看的倒计时。
-  const line2 = (G.phase === 'prep')
-    ? ('备战 ' + Math.ceil(Math.max(0, G.prepT)) + 's')
-    : ('下一波 ' + Math.ceil(Math.max(0, WAVE_GAP - G.waveT)) + 's');
-  ctx.fillStyle = INK3; ctx.font = '14px ' + FONT;
-  ctx.fillText(line2, W-138, 52);
-
-  // 暂停按钮（仅人机对战、战斗/备战时出现）
-  if (canPause()){
-    const b = BTN_PAUSE;
-    ctx.fillStyle = 'rgba(70,60,45,0.16)';
-    rr(ctx, b.x + 1, b.y + 2, b.w, b.h, 14); ctx.fill();
-    ctx.fillStyle = 'rgba(255,255,255,0.88)';
-    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
-    ctx.strokeStyle = 'rgba(90,80,65,0.28)'; ctx.lineWidth = 1.5;
-    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.stroke();
-    // 双竖条暂停图标
-    ctx.fillStyle = INK2;
-    rr(ctx, b.x + 16, b.y + 14, 8, 24, 3); ctx.fill();
-    rr(ctx, b.x + 28, b.y + 14, 8, 24, 3); ctx.fill();
-  }
-}
-
 function drawHandAndButtons(){
   // 手牌区底板
   ctx.fillStyle = 'rgba(255,255,255,0.42)';
-  rr(ctx, HAND_X0 - 14, HAND_Y - 24, (HAND_N*HAND_S + (HAND_N-1)*HAND_GAP) + 28, HAND_S + 40, 14);
+  rr(ctx, HAND_X0 - 12, HAND_Y - 12, (HAND_N*HAND_S + (HAND_N-1)*HAND_GAP) + 24, HAND_S + 24, 14);
   ctx.fill();
   ctx.strokeStyle = 'rgba(90,80,65,0.16)'; ctx.lineWidth = 1; ctx.stroke();
-
-  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  ctx.fillText('拖到熟地=守军(路上打不到) · 拖到路上=在出兵格后一格一个排队(下一波随军) · 同种同阶相叠升阶 · 两字相邻召将', HAND_X0, HAND_Y - 13);
 
   for (let i = 0; i < HAND_N; i++){
     const x = HAND_X0 + i*(HAND_S + HAND_GAP);
@@ -3277,32 +3511,35 @@ function drawHandAndButtons(){
       ctx.fillText('道具', s.x + SLOT_S/2, s.y + SLOT_S/2);
     }
   }
-  // 羁绊 + 被动道具
+  // 底部两行说明：操作区的最后一条也被填上（以前这两行画在 1600，早跑到画布外面去了）
+  const fy = BTN_ENLIST.y + BTN_ENLIST.h + 22;
+  ctx.font = '13px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK3;
+  ctx.fillText('拖到熟地＝守军（路上打不到）· 拖到路上＝排队随军 · 同种同阶相叠升阶 · 两字相邻召将', 24, fy);
+
   const bs = [];
   for (const b of BONDS) if (G.bondOn[b.id]) bs.push(b.name);
   const ps = [];
   for (const k in G.passive) if (G.passive[k]) ps.push(ITEMS[k].icon);
-  ctx.font = '13px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-  if (bs.length){
-    ctx.fillStyle = '#8a5a06';
-    ctx.fillText('羁绊 · ' + bs.join(' / ') + (ps.length ? ('　被动：' + ps.join(' ')) : ''), 20, 1600);
-  } else if (ps.length){
-    ctx.fillStyle = INK3;
-    ctx.fillText('被动：' + ps.join(' '), 20, 1600);
-  } else {
-    ctx.fillStyle = INK3;
-    ctx.fillText('馒头只从「杀掉敌军」里来 · 你守下半场，电脑守上半场', 20, 1600);
+  let line2 = '';
+  if (bs.length) line2 = '羁绊 · ' + bs.join(' / ') + (ps.length ? ('　被动 · ' + ps.join(' ')) : '');
+  else if (ps.length) line2 = '被动 · ' + ps.join(' ');
+  if (line2){
+    ctx.fillStyle = '#8a5a06'; ctx.font = '13px ' + FONT;
+    ctx.fillText(line2, 24, fy + 26);
   }
   if (G.aduShield > 0){
-    ctx.fillStyle = GOLD; ctx.font = 'bold 15px ' + FONT; ctx.textAlign = 'right';
-    ctx.fillText('神兵符 无敌 ' + G.aduShield.toFixed(1) + 's', W-20, 1600);
+    ctx.fillStyle = GOLD; ctx.font = 'bold 14px ' + FONT; ctx.textAlign = 'right';
+    ctx.fillText('神兵符 无敌 ' + G.aduShield.toFixed(1) + 's', W - 24, fy + 26);
   }
 }
 
-function drawFx(){
+/* 特效也按「落在哪一半」分给各自的视口：一束光、一圈涟漪不会横跨两张盘子 */
+function drawFx(v, foeHalf){
   for (const f of G.fx){
     const p = f.t / f.dur;
     if (f.type === 'beam'){
+      if (inFoeHalf((f.y1 + f.y2) / 2) !== foeHalf) continue;
       ctx.save();
       ctx.globalAlpha = (1-p) * 0.9;
       ctx.strokeStyle = GOLD; ctx.lineWidth = 16*(1-p) + 4; ctx.lineCap = 'round';
@@ -3311,6 +3548,7 @@ function drawFx(){
       ctx.beginPath(); ctx.moveTo(f.x1, f.y1); ctx.lineTo(f.x2, f.y1 + (f.y2-f.y1)); ctx.stroke();
       ctx.restore();
     } else if (f.type === 'ring'){
+      if (inFoeHalf(f.y) !== foeHalf) continue;
       ctx.save();
       ctx.globalAlpha = (1-p) * 0.85;
       ctx.strokeStyle = f.color || INK; ctx.lineWidth = 10*(1-p) + 2;
@@ -3319,6 +3557,7 @@ function drawFx(){
     }
   }
   for (const p of G.parts){
+    if (inFoeHalf(p.y) !== foeHalf) continue;
     const a = 1 - p.t/p.dur;
     ctx.globalAlpha = a;
     ctx.fillStyle = p.color;
@@ -3326,6 +3565,7 @@ function drawFx(){
   }
   ctx.globalAlpha = 1;
   for (const f of G.floaters){
+    if (inFoeHalf(f.y) !== foeHalf) continue;
     const a = 1 - f.t/f.dur;
     ctx.globalAlpha = a;
     ctx.fillStyle = f.color;
@@ -3339,11 +3579,12 @@ function drawDragger(){
   if (!G.dragger) return;
   const d = G.dragger;
   const isHero = d.tile.kind === 'hero';
-  const h = CELL - 12;
+  // 拖着的牌按我方棋盘的倍率画，落到盘上不会「缩一下」
+  const h = (CELL - 12) * V_PLAY.k;
   const w = isHero ? h * 2 + 8 : h;
-  // 名将：先把要占的两个格子亮出来
+  // 名将：先把要占的两个格子亮出来（世界格 → 屏幕格）
   if (isHero){
-    const mi = boardCellAt({ x: d.x, y: d.y }, Y_MINE);
+    const mi = boardCellAtV({ x: d.x, y: d.y }, V_PLAY);
     if (mi >= 0){
       const allow = d.from.kind === 'board' ? [d.from.idx] : [];
       const span = findHeroSpan(mi, G.board, true, allow);
@@ -3352,7 +3593,8 @@ function drawDragger(){
         ctx.strokeStyle = 'rgba(184,134,11,0.85)'; ctx.lineWidth = 2.5;
         ctx.setLineDash([7,5]);
         for (const i of span){
-          rr(ctx, BX + colOf(i)*CELL + 2, Y_MINE + rowOf(i)*CELL + 2, CELL-4, CELL-4, 9);
+          const r = cellRectV(V_PLAY, i);
+          rr(ctx, r.x + 2, r.y + 2, r.s - 4, r.s - 4, 9);
           ctx.stroke();
         }
         ctx.setLineDash([]);
@@ -3641,21 +3883,14 @@ function drawPause(){
 /* ---------------- 主绘制 ---------------- */
 function draw(){
   drawBg();
-  drawBoardBase(Y_ENEMY, G.enBoard, true);
-  drawBoardBase(Y_MINE, G.board, false);
-  drawSideTags();
-  drawUnitsOnBoard(Y_ENEMY, G.enBoard, true);
-  drawUnitsOnBoard(Y_MINE, G.board, false);
-  drawAdu(ADU_E, G.enLife, G.enMax, false);
-  drawAdu(ADU_M, G.myLife, G.myMax, true);
-  drawGates();
-
-  drawMarchers();
-  drawFx();
-  drawHUD();
-  drawHandAndButtons();
-  drawInspect();
+  drawBoardIn(V_PLAY, true);          // 下 2/3：我方战场
+  drawEnemyPanel();                   // 上 1/3 右：敌军缩略图
+  drawInfoPanel();                    // 上 1/3 左：战况
+  drawHandAndButtons();               // 兵营 + 按键
   drawDragger();
+  drawInspectPanel();
+
+  if (G.enemyBig) drawEnemyBig();     // 放大视图盖住上 2/3（只读，点一下收起）
   drawToast();
 
   if (G.phase === 'intro') drawIntro();
@@ -3692,6 +3927,19 @@ function boardCellAt(p, baseY){
   if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return -1;
   return c + r*COLS;
 }
+/* 屏幕点 -> 某个视口里的第几格（缩略图 / 放大图 / 我方棋盘都走这一条） */
+function boardCellAtV(p, v){
+  return boardCellAt(viewWorld(v, p), v.wy0);
+}
+/* 点没点到路上那颗兵（按它所在视口的屏幕位置算，缩略图里给一点宽容度） */
+function hitMarcher(e, p, v){
+  const q = viewPt(v, e.x, e.y);
+  return Math.hypot(q.x - p.x, q.y - p.y) <= Math.max(20, e.w * v.k * 0.8);
+}
+/* 这一颗兵现在画在哪个视口 */
+function marcherView(e){
+  return inFoeHalf(e.y) ? (G.enemyBig ? V_BIG : V_MINI) : V_PLAY;
+}
 
 function onDown(ev){
   ev.preventDefault();
@@ -3722,6 +3970,24 @@ function onDown(ev){
     return;
   }
 
+  // 敌军放大视图（只读）：点单位看详情，点「收起」或空白处缩回去
+  if (G.enemyBig){
+    if (inRect(p, BTN_FOLD)){ G.enemyBig = false; closeInspect(); sfx('click'); return; }
+    const ei = boardCellAtV(p, V_BIG);
+    if (ei >= 0 && G.enBoard[ei]){ inspectAt('ai', G.enBoard[ei], ei); return; }
+    for (const e of G.marchers){ if (inFoeHalf(e.y) && hitMarcher(e, p, V_BIG)){ inspectAt('foe', e); return; } }
+    G.enemyBig = false; closeInspect(); sfx('click');
+    return;
+  }
+
+  // 敌军缩略图：点一下放大；点左半的战况面板不做事（暂停按钮已在上面拦下）
+  if (p.y < TOP_H){
+    if (p.x >= W/2){
+      G.enemyBig = true; closeInspect(); sfx('click');
+    }
+    return;
+  }
+
   // 征兵
   if (inRect(p, BTN_ENLIST)){ enlist(); return; }
   // 道具槽
@@ -3733,14 +3999,8 @@ function onDown(ev){
   // 曾经打开的详情面板：点到空白处即关闭
   const hadInspect = !!G.inspect;
 
-  // 上半场（电脑方）：只用来查看，不能操作
-  const ei = boardCellAt(p, Y_ENEMY);
-  if (ei >= 0 && G.enBoard[ei]){
-    inspectAt('ai', G.enBoard[ei], ei);
-    return;
-  }
-  // 场上行进的敌军：也能点开看
-  for (const e of G.marchers){ if (Math.hypot(e.x - p.x, e.y - p.y) <= 34){ inspectAt('foe', e); return; } }
+  // 场上行进的兵：也能点开看（按它被画在哪个视口里算命中）
+  for (const e of G.marchers){ if (hitMarcher(e, p, marcherView(e))){ inspectAt('foe', e); return; } }
 
   // 拿手牌
   const hi = handIndexAt(p);
@@ -3750,7 +4010,7 @@ function onDown(ev){
     return;
   }
   // 拿我方的牌（名将会连带它占的另一格一起拿起）
-  const mi = boardCellAt(p, Y_MINE);
+  const mi = boardCellAtV(p, V_PLAY);
   if (mi >= 0 && G.board[mi]){
     const u = G.board[mi];
     closeInspect();
@@ -3810,7 +4070,7 @@ function onUp(ev){
     refreshBonds();
   }
 
-  const mi = boardCellAt(p, Y_MINE);
+  const mi = boardCellAtV(p, V_PLAY);
   const hslot = handSlotAt(p);
 
   if (mi >= 0){
@@ -3964,6 +4224,8 @@ window.__api = {
   isAduCell, inspectAt, closeInspect, makeInspect, statAtkOf, rateOf, rangeOf, spdOf, cellStr, spdStr,
   newUnit, fuseUnit, toUnitObject,
   autoFormHeroes, handSlotAt, handIndexAt, boardCellAt, toLogical, onDown, onMove, onUp,
+  boardCellAtV, viewPt, viewWorld, cellRectV, hitMarcher, marcherView, insScreenY,
+  V_MINI, V_BIG, V_PLAY, BTN_FOLD,
   ensureMyBuffs, ensureBuffs, nearestDefender, nearestMyUnit, nearestAiUnit, killDefender, killMyUnit, hitAdu, startWave,
   sideInfo, castHeroSkill, atkMulOf, defMulOf, foeOf, colorOf,
   damageMarcher, killMarcher, strikeMarcher, strikeDefender, marchForward, raiderRoute, forwardRoute,
@@ -3982,7 +4244,9 @@ window.__api = {
          get seed(){ return fixedSeed; },
          ADU_R, MID1, MID2, BLOCK_R, DUEL_R, MARCH_SCALE, AI_TICK, START_OPEN, WAVE_GAP, WAVE_EARLY_MIN, MOVE_MUL, SHOVEL_RATE,
          MY_HP_MUL, MY_DEF_MUL, MY_REGEN_IDLE, MY_REGEN_PCT, ATK_MOVE_MUL,
-         HAND_Y, HAND_S, HAND_X0, HAND_GAP, BTN_PAUSE, get SCALE(){ return SCALE; } },
+         HAND_Y, HAND_S, HAND_X0, HAND_GAP, BTN_PAUSE, BTN_ENLIST, SLOT, SLOT_S,
+         TOP_H, BOT_Y, BIG_H, PLAY_S, MINI_K, BIG_K, SEAM_Y,
+         get SCALE(){ return SCALE; } },
 };
 boot();
 window.__G = G;
