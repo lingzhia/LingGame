@@ -1,0 +1,3993 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="A1mn9NFMrS7DkYakfzc01T">
+<head data-page-node-id="B7zN2WGl8v0EWLfF9F584H">
+<meta charset="utf-8" data-page-node-id="jZ1UMOsADKe1jAxmKSiH7X">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" data-page-node-id="fC4ShShd8tHCSDHGoLISZd">
+<title>WordTower · 文字塔防</title>
+<style>
+  /* 画布是 720×1446 的竖幅，宽屏下左右必然留白。
+     留白不用纯黑，改成和画面同系的纸色，整幅画读起来像摊在案上的一卷绢 ——
+     比「黑底里嵌一条窄画面」舒服得多。 */
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;
+    background:#e8ddca;
+    background-image:linear-gradient(180deg,#e4d8c3 0%,#f3ebdc 44%,#e2d5bf 100%);
+    -webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none;}
+  #wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;}
+  canvas{display:block;touch-action:none;
+    box-shadow:0 12px 42px rgba(70,58,38,.28), 0 0 0 1px rgba(90,80,65,.20);}
+</style>
+</head>
+<body data-page-node-id="1AbzrpQ6nUX7JBHkJHKqFn">
+<div id="wrap" data-page-node-id="wLDlTB41WbcDUOGBEIkeuz"><canvas id="cv" data-page-node-id="LSxDfIzi7tPRWxs9X6bFIP"></canvas></div>
+<script>
+(function(){
+'use strict';
+
+/* ============================================================
+   WordTower · 文字塔防（复刻）
+   核心：1V1 上下分屏双线对攻 / 阿斗 3 命 / 8×8 棋盘 ·
+        出兵点一格、阿斗一格、中间一条蛇形路占若干格 /
+        蛇形路每局随机重掷（不许占满任何 2×2 田字格） /
+        征兵一次刷新 5 格（旧牌自动回收） / 馒头只来自杀敌 /
+        同字升阶 / 12 名将拼名召唤 / 羁绊 /
+        神秘商人道具 / 白绿蓝紫金五品
+   版式：竖屏 720×1446（两块棋盘上下叠放，16 行格子的天生瘦长比例）·
+        格子 72、HUD / 中缝 / 手牌 / 按钮全部压紧，左右留白用阵营标签填住
+   ============================================================ */
+
+/* ---------------- 画布 ---------------- */
+const W = 720, H = 1446;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let SCALE = 1, DPR = 1;
+
+/* 棋盘：8 列 × 8 行的一张方阵。
+   出兵点与阿斗各自就是棋盘上的一个格子，两点之间用一条蛇形「路」连起来 ——
+   路格与阿斗格不可布防，其余格子才是能摆兵、摆将的地方。
+   竖版比例：两块棋盘上下叠放，纵向一共 16 行格子 —— 画面天生偏瘦长。
+   所以格子从 78 收到 72，上下留白（HUD / 中缝 / 手牌 / 按钮）一并压紧，
+   整幅画布从 720×1620 收到 720×1446，左右留白用阵营标签填上。 */
+const COLS = 8, ROWS = 8, CELL = 72;
+const BX = (W - COLS * CELL) / 2;        // 72
+const Y_ENEMY = 80;                       // 电脑方棋盘 y0 -> 80..656
+const Y_MINE  = 676;                      // 我方棋盘 y0 -> 676..1252
+const MID1 = 656, MID2 = 676;             // 中缝（双方的出兵点都贴着它）
+const ADU_R = 24;
+
+const cellAt = (c, r) => c + r*COLS;
+
+/* 熟地（开局直接能布阵的格子）与荒地：
+   一局开始时只发 START_OPEN 格熟地 —— 从「离路近、贴着阿斗、靠前线」的次序里挑最好的几格，
+   其余可布防的格子全是荒地，得一格一格用铲子挖开。
+   电脑半场拿的是同一张名单的上下镜像（FREE_E），两边地界完全对等。 */
+const START_OPEN = 5;
+/* 开局只有 5 格熟地，扩地全靠铲子 —— 铲子的掉落率就是「扩张速度」这一个旋钮。
+   5.5% 时一局下来挖不开几格，盘面永远是那五个坑；提到 10% 后大约每两手牌能见一把铲子。 */
+const SHOVEL_RATE = 0.10;
+let FREE_M = {}, FREE_E = {};        // 熟地名单：我方 / 电脑半场（上下镜像）
+function computeFreeLand(){
+  const cand = [];
+  for (let i = 0; i < COLS*ROWS; i++){
+    if (isRoad(i, true)) continue;
+    cand.push(i);
+  }
+  // 分数高的先给：离路近、挨着阿斗、越靠前线越好
+  cand.sort((a, b) => (cellScore(b, true) - cellScore(a, true)) || (a - b));
+  FREE_M = {}; FREE_E = {};
+  for (const i of cand.slice(0, START_OPEN)){
+    FREE_M[i] = true;
+    FREE_E[cellAt(colOf(i), ROWS - 1 - rowOf(i))] = true;
+  }
+}
+
+/* ---------------- 随机地图 ----------------
+   一条「路」= 从出兵点（紧贴中缝那一行的一格）出发、一路往下蛇行到阿斗身前的一串格子。
+   本地坐标 [列, 行]：行 0 贴着中缝，行 ROWS-1 是最里侧（阿斗坐的那一行）。
+   两条硬规矩：
+     1) 路是一串首尾相连、互不重叠的格子，最后停在与阿斗正交相邻的那一格；
+     2) 任何 2×2 田字格都不允许被路块（含阿斗那一格）占满 ——
+        占满了就会出现一块实心死角，既糊成一团，也挡住布防视野。
+   每次开局重掷一张；电脑半场用同一张图上下镜像，两边完全对等。 */
+
+let PATH_M = [];                     // 我方半场的路
+let ADU_M_C = [0, ROWS-1];           // 我方阿斗：路的尽头再往里一格
+let PATH_E = [];                     // 电脑半场（上下镜像）
+let ADU_E_C = [0, 0];
+let PATH_CELLS_M = [], PATH_CELLS_E = [];
+let ADU_M_CELL = 0, ADU_E_CELL = 0;
+let ADU_M = { x: 0, y: 0, r: ADU_R }, ADU_E = { x: 0, y: 0, r: ADU_R };
+
+let mapRnd = Math.random;            // 地图专用的随机源（可换种子复现）
+let fixedSeed = null;
+function mulberry32(a){
+  return function(){
+    a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const mapInt = n => (mapRnd() * n) | 0;
+
+/* 掷一条候选路：从 (startC,0) 随机往下走，最后必须停在阿斗正上方那一格 */
+function rollPath(){
+  const startC = mapInt(COLS), aduC = mapInt(COLS);
+  const path = [], seen = {};
+  const push = (c, r) => { path.push([c, r]); seen[r*COLS + c] = 1; };
+  let c = startC, r = 0, run = 0, guard = 0;
+  push(c, r);
+  while (guard++ < 160){
+    if (r === ROWS-2 && c === aduC) break;        // 停到阿斗跟前，收工
+    if (r === ROWS-2){                            // 倒数第二行：只朝阿斗那一列靠
+      c += (c < aduC ? 1 : -1);
+      push(c, r);
+      continue;
+    }
+    const canL = c > 0 && !seen[r*COLS + c-1];
+    const canR = c < COLS-1 && !seen[r*COLS + c+1];
+    // 横着跑太长就往下拐：横带短一点，路才铺得开
+    const mustDown = run >= 5 + mapInt(4) || !(canL || canR);
+    if (mustDown || mapRnd() < 0.27){
+      r++; run = 0; push(c, r);
+    } else if (canL && canR){
+      c += (mapRnd() < 0.5 ? -1 : 1); run++; push(c, r);
+    } else if (canL){
+      c--; run++; push(c, r);
+    } else {
+      c++; run++; push(c, r);
+    }
+  }
+  const cols = {};
+  for (const p of path) cols[p[0]] = 1;
+  return { path, aduC, cols: Object.keys(cols).length };
+}
+
+/* 2×2 校验：任何一个田字格都不许被路块占满 */
+function quadOK(path, aduC){
+  const road = {};
+  for (const p of path) road[p[1]*COLS + p[0]] = 1;
+  road[(ROWS-1)*COLS + aduC] = 1;                 // 阿斗那一格也是路
+  for (let r = 0; r < ROWS-1; r++)
+    for (let c = 0; c < COLS-1; c++)
+      if (road[r*COLS+c] && road[r*COLS+c+1] &&
+          road[(r+1)*COLS+c] && road[(r+1)*COLS+c+1]) return false;
+  return true;
+}
+
+/* 兜底地图：万一脸黑掷不出合格的，就用这张手写的（同样满足 2×2 约束） */
+const FALLBACK = { aduC: 3, path: [
+  [3,0],
+  [3,1],[2,1],[1,1],[0,1],
+  [0,2],[0,3],[0,4],
+  [1,4],[2,4],[3,4],[4,4],[5,4],[6,4],[7,4],
+  [7,5],[7,6],
+  [6,6],[5,6],[4,6],[3,6],
+] };
+
+/* 把一条路写进全局：我方用原样，电脑半场上下镜像 */
+function applyMap(path, aduC){
+  PATH_M = path.map(p => [p[0], p[1]]);
+  ADU_M_C = [aduC, ROWS-1];
+  PATH_E = PATH_M.map(p => [p[0], ROWS - 1 - p[1]]);
+  ADU_E_C = [ADU_M_C[0], ROWS - 1 - ADU_M_C[1]];
+  PATH_CELLS_M = PATH_M.map(p => cellAt(p[0], p[1]));
+  PATH_CELLS_E = PATH_E.map(p => cellAt(p[0], p[1]));
+  ADU_M_CELL = cellAt(ADU_M_C[0], ADU_M_C[1]);
+  ADU_E_CELL = cellAt(ADU_E_C[0], ADU_E_C[1]);
+  ADU_M = { x: cellCX(ADU_M_C[0]), y: cellCY(ADU_M_C[0], ADU_M_C[1], Y_MINE), r: ADU_R };
+  ADU_E = { x: cellCX(ADU_E_C[0]), y: cellCY(ADU_E_C[0], ADU_E_C[1], Y_ENEMY), r: ADU_R };
+}
+
+/* 掷一张新地图。seed 给了就按种子复现（方便调试／写测试） */
+function genMap(seed){
+  if (seed === undefined) seed = fixedSeed;
+  mapRnd = (seed === null || seed === undefined) ? Math.random : mulberry32(seed >>> 0);
+  for (let attempt = 0; attempt < 900; attempt++){
+    const m = rollPath();
+    if (m.path.length < 20) continue;       // 太短：一路直下，既没布防纵深，敌军也跑得太快
+    if (m.cols < 5) continue;               // 太窄：整条路挤在两三列里
+    if (!quadOK(m.path, m.aduC)) continue;  // 占满了某个田字格
+    applyMap(m.path, m.aduC);
+    return { path: PATH_M.slice(), aduC: ADU_M_C[0] };
+  }
+  applyMap(FALLBACK.path, FALLBACK.aduC);
+  return { path: PATH_M.slice(), aduC: ADU_M_C[0] };
+}
+genMap();
+
+function pathList(mine){ return (mine === false) ? PATH_E : PATH_M; }
+function pathCells(mine){ return (mine === false) ? PATH_CELLS_E : PATH_CELLS_M; }
+function isPathCell(cell, mine){ return pathCells(mine).indexOf(cell) >= 0; }
+function isAduCell(cell, mine){ return cell === (mine === false ? ADU_E_CELL : ADU_M_CELL); }
+/* 路格 + 阿斗格：整条通道都不能布防 */
+function isRoad(cell, mine){ return isPathCell(cell, mine) || isAduCell(cell, mine); }
+/* 路的折线点（格心）：敌兵沿着它一个点一个点地走，
+   走完最后一个点再往前一步就是阿斗 */
+function pathPoints(mine){
+  const base = (mine === false) ? Y_ENEMY : Y_MINE;
+  return pathList(mine).map(p => ({ x: cellCX(p[0]), y: cellCY(p[0], p[1], base) }));
+}
+function spawnPos(mine){
+  const base = (mine === false) ? Y_ENEMY : Y_MINE;
+  const p = pathList(mine)[0];
+  return { x: cellCX(p[0]), y: cellCY(p[0], p[1], base) };
+}
+/* 某个格子离「路」最近还隔着几格（切比雪夫距离）：1 = 紧贴路边，越大越荒 */
+function pathAway(cell, mine){
+  const c = colOf(cell), r = rowOf(cell);
+  let best = 99;
+  for (const p of pathList(mine))
+    best = Math.min(best, Math.max(Math.abs(p[0] - c), Math.abs(p[1] - r)));
+  return best;
+}
+/* 电脑能不能在这一格布阵：熟地名单（FREE_E）里的，或它自己用铲子挖开的 */
+function aiLandOK(cell){
+  if (FREE_E[cell]) return true;
+  return !!(G && G.aiUnlocked && G.aiUnlocked[cell]);
+}
+const AI_TICK = 0.55;        // 电脑对手的决策间隔（秒）
+/* 电脑盘上最多留几个「还没配成对」的单字（它们只是等伙伴的种子）。
+   单字落地只是个占位道具（血 1、不会攻击），堆多了就是把熟地变成死地。 */
+const AI_MAX_CHARS = 3;
+/* 电脑盘上剩下的空熟地少于这个数时，就不再拿「配不成对的单字」去占坑了 ——
+   坑位留给真兵更划算。 */
+const AI_HOLD_FREE = 4;
+/* 电脑要不要做异字合成（弩/骁/钺/铁/戟/骧这六个合成兵种）。
+   关掉的理由：玩家看到对面凭空冒出没见过的兵种，第一反应是「AI 在作弊」——
+   这是可读性问题，不是强度问题。打开 = true 即恢复对称规则。 */
+const AI_FUSE = false;
+/* 异字合成（弩/骁/钺/铁/戟/骧）整体关掉：两个不同兵种叠在一起不再变出新兵种。
+   兵种就只留刀/枪/弓/骑四种 + 同种升阶 + 拼名召将，规则一眼能算清。
+   想恢复只需把 FUSE_ON 改 true。 */
+const FUSE_ON = false;
+/* 电脑的合成结果是否允许落地：异字合成关着的时候，弓1+骑1 不再变骁骑 */
+function aiCombOK(comb){
+  return !!AI_FUSE || !(comb && comb.kind === 'unit' && !!FUSE[comb.type]);
+}
+
+const HAND_N = 5, HAND_S = 78, HAND_GAP = 8, HAND_Y = 1280;
+const HAND_X0 = (W - (HAND_N * HAND_S + (HAND_N - 1) * HAND_GAP)) / 2; // 149
+const BTN_ENLIST = { x: 130, y: 1382, w: 226, h: 56 };
+const SLOT = [{ x: 378, y: 1382 }, { x: 450, y: 1382 }];
+const SLOT_S = 56;
+const BTN_PAUSE = { x: W - 62, y: 12, w: 52, h: 52 };   // 右上角
+
+/* ---------------- 配色 ---------------- */
+const PAPER   = '#f2ebdd';
+const PAPER_D = '#e5dbca';
+const PAPER_L = '#faf6ee';
+const INK     = '#2b2620';
+const INK2    = '#5b5347';
+const INK3    = '#968c7a';
+const LINE    = 'rgba(90,80,65,0.20)';
+const SEAL    = '#b03a2e';
+const GOLD    = '#b8860b';
+const GRASS   = '#7d9c5a';   // 未开垦格子
+const FONT    = '"Songti SC","STSong","SimSun","Noto Serif SC",serif';
+
+/* ---------------- 品阶：白 绿 蓝 紫 金 ----------------
+   同种兵相叠即升阶（等级相差 ≤1 也能合，结果 = 较高阶 +1）：等级越高，攻击力与攻速同步提升。
+   五阶用五套颜色区分（底色 / 边框 / 字色 / 角标），牌面离远看也能认出等级；
+   角标上直接写数字 1–5，不再用「卒/士/校/尉/将」这套文字（n 字段保留作内部名，不上屏）。
+   底色是刻意压深的，不然全是浅白，扫一眼分不出谁几阶。 */
+const TIER = [
+  null,
+  { n:'卒', c:'#6b6357', bg:'#efeade', bd:'#a89c86', bar:'#a89c86', hpMul:1.00, atkMul:1.00, rateMul:1.00 },
+  { n:'士', c:'#22643a', bg:'#d9eedd', bd:'#4c9a62', bar:'#3f8a55', hpMul:1.70, atkMul:1.60, rateMul:1.16 },
+  { n:'校', c:'#1c4f8c', bg:'#d8e9fb', bd:'#3d7cc2', bar:'#2f6cb0', hpMul:2.70, atkMul:2.50, rateMul:1.34 },
+  { n:'尉', c:'#5c2c86', bg:'#e8d9f8', bd:'#8850bb', bar:'#7740ab', hpMul:4.20, atkMul:3.90, rateMul:1.54 },
+  { n:'将', c:'#845607', bg:'#fae5b8', bd:'#c08f16', bar:'#c08f16', hpMul:6.40, atkMul:6.00, rateMul:1.78 },
+];
+const MAX_TIER = 5;
+// 名将按自己的曲线成长（上限 5 阶）：血量/攻击更平缓，攻速一样随阶提升
+const heroHpMul  = lv => 1 + 0.52*(lv-1);
+const heroAtkMul = lv => 1 + 0.62*(lv-1);
+const heroRateMul= lv => 1 + 0.14*(lv-1);
+
+/* ---------------- 基础兵种：四类兵的攻速 / 攻击力 / 射程各不相同 ---------------- */
+// rate = 每秒出手次数；range = 攻击范围（像素）；vs = 克制的敌兵，伤害 ×1.6
+/* 全游戏只有这一套兵：玩家守军、玩家出击兵、电脑守军、电脑来袭的兵，都是这四个。
+   - rate = 每秒出手次数（站桩防守时用）
+   - spd  = 行军速度（格/秒），只有上路行军的兵才用；站桩守军不看这个
+   - w    = 画在路上的圆盘直径
+   - mantou = 被对面击杀时，击杀方能拿到的馒头（默认 1 个，别靠它撑经济）
+   克制环（补齐了原来重复的两条）：骑 → 刀 → 弓 → 枪 → 骑，伤害 ×1.6 */
+/* 数值基准：刀兵 = 血 100 / 攻 10 / 攻速 1.0（DPS 10）。
+   另外三样都围着这条基准线摆，规矩是「射程是白拿的输出时间」——
+   射程越长，DPS 与血量压得越低，否则远程等于白吃伤害。
+     刀  100/10/1.00 → DPS 10.0   射程 1.4 格  最厚最稳
+     枪   90/14/0.80 → DPS 11.2   射程 2.1 格  单发最重，隔一格先手
+     弓   75/ 8/1.20 → DPS  9.6   射程 4.6 格  全程有输出时间，所以 DPS 偏低
+     骑   80/ 7/1.90 → DPS 13.3   射程 1.6 格  DPS 最高、行军最快，血薄怕枪
+   铁律：克制方 1v1 必须赢。刀打弓 4.7s / 枪打骑 4.5s / 弓打枪 5.9s / 骑打刀 4.7s，
+   反过来（逆克制）要 6.7~10.4s —— 克制环是算得出来的，不是贴标签。 */
+const UNITS = {
+  dao:   { char:'刀', name:'刀兵', hp:100, atk:10, rate:1.00, range:104, spd:1.00, w:40, mantou:1, kind:'近战', vs:['gong'],
+           desc:'短刀近身砍杀 · 射程最短、血量最厚，站桩扛线首选，克弓兵' },
+  qiang: { char:'枪', name:'枪兵', hp:90,  atk:14, rate:0.80, range:152, spd:0.90, w:38, mantou:1, kind:'近战', vs:['qi'],
+           desc:'长枪戳刺 · 比刀长半格先手，单发最重但出手慢，克骑兵' },
+  gong:  { char:'弓', name:'弓兵', hp:75,  atk:8,  rate:1.20, range:330, spd:0.95, w:34, mantou:1, kind:'远程', vs:['qiang'],
+           desc:'万箭齐发 · 射程最远、全程有输出时间，代价是 DPS 与血量都最低，克枪兵' },
+  qi:    { char:'骑', name:'骑兵', hp:80,  atk:7,  rate:1.90, range:118, spd:1.55, w:38, mantou:1, kind:'近战', vs:['dao'],
+           desc:'轻骑冲阵 · 攻速与行军都最快、DPS 最高，单发很轻、血量偏薄，克刀兵' },
+};
+const BASE_KEYS = ['dao','qiang','gong','qi'];
+
+/* ---------------- 异字合成表（文字魔法）----------------
+   注意：FUSE_ON=false，这张表目前不参与任何判定，只留给以后想开回来时用。 */
+const FUSE = {
+  'dao+gong':   { char:'弩', name:'弩兵', hp:74,  atk:21, rate:0.95, range:372, kind:'远程', vs:['qi','gong'],
+                  desc:'刀+弓 · 全场最远射程，单发极重' },
+  'gong+qi':    { char:'骁', name:'骁骑', hp:64,  atk:15, rate:2.05, range:158, kind:'近战', vs:['dao','qiang'],
+                  desc:'弓+骑 · 攻速最高的突击手' },
+  'dao+qiang':  { char:'钺', name:'陌刀', hp:130, atk:23, rate:0.78, range:136, kind:'近战', vs:['gong','qi'],
+                  desc:'刀+枪 · 最高血量，慢刀重斩' },
+  'dao+qi':     { char:'铁', name:'铁骑', hp:96,  atk:16, rate:1.35, range:132, kind:'近战', vs:['gong'],
+                  desc:'刀+骑 · 能扛能打的均衡近战' },
+  'qiang+gong': { char:'戟', name:'戟兵', hp:88,  atk:17, rate:1.00, range:216, kind:'近战', vs:['qi','gong'],
+                  desc:'枪+弓 · 中远程拒马，射程可观' },
+  'qiang+qi':   { char:'骧', name:'龙骧骑', hp:82, atk:19, rate:1.45, range:152, kind:'近战', vs:['dao','qi'],
+                  desc:'枪+骑 · 高攻高速的冲阵骑' },
+};
+function fuseKey(a, b){
+  const k1 = a + '+' + b, k2 = b + '+' + a;
+  return FUSE[k1] ? k1 : (FUSE[k2] ? k2 : null);
+}
+
+/* ---------------- 12 名将 ---------------- */
+const HEROES = {
+  '赵云': { a:'赵', b:'云', r:'gold',   skill:'longdan',  cd:9.0,  hp:540, atk:60, rate:1.15, range:230,
+            sk:'龙胆', skDesc:'长枪贯穿全场，重创所有敌军' },
+  '关羽': { a:'关', b:'羽', r:'gold',   skill:'wusheng',  cd:7.5,  hp:590, atk:67, rate:1.00, range:186,
+            sk:'武圣', skDesc:'跳斩敌军最密处，大范围重伤' },
+  '张飞': { a:'张', b:'飞', r:'gold',   skill:'dangyang', cd:10.0, hp:650, atk:39, rate:0.85, range:166,
+            sk:'当阳桥', skDesc:'一声怒吼，全场敌军眩晕 3 秒' },
+  '刘备': { a:'刘', b:'备', r:'gold',   skill:'rende',    cd:11.0, hp:550, atk:30, rate:0.95, range:250,
+            sk:'仁德', skDesc:'全队回血 35%，并灼烧全场敌军' },
+  '黄忠': { a:'黄', b:'忠', r:'gold',   skill:'liegong',  cd:9.5,  hp:450, atk:69, rate:0.85, range:400,
+            sk:'烈弓', skDesc:'全屏箭雨连射 3 秒' },
+  '马超': { a:'马', b:'超', r:'gold',   skill:'tieqi',    cd:8.0,  hp:560, atk:48, rate:1.30, range:172,
+            sk:'铁骑', skDesc:'铁骑踏阵，全场敌军减速并受伤' },
+  '关兴': { a:'关', b:'兴', r:'purple', hp:375, atk:39, rate:1.15, range:180 },
+  '关平': { a:'关', b:'平', r:'purple', hp:340, atk:44, rate:1.05, range:180 },
+  '张苞': { a:'张', b:'苞', r:'purple', hp:425, atk:35, rate:1.05, range:172 },
+  '张翼': { a:'张', b:'翼', r:'purple', hp:350, atk:41, rate:1.10, range:190 },
+  '黄祖': { a:'黄', b:'祖', r:'purple', hp:375, atk:38, rate:1.00, range:230 },
+  '黄盖': { a:'黄', b:'盖', r:'purple', hp:450, atk:23, rate:0.95, range:170, noSkill:true },
+};
+const GOLD_HEROES = ['赵云','关羽','张飞','刘备','黄忠','马超'];
+const PURPLE_HEROES = ['关兴','关平','张苞','张翼','黄祖','黄盖'];
+const HERO_MAXLV = { gold: 5, purple: 3 };
+/* ---------------- 名将成长 ----------------
+   合成不是唯一的升阶路：名将在场上杀敌会自己攒经验，攒够就自动升一阶。
+   两条路共用 heroHpMul / heroAtkMul / heroRateMul，最后长成同一个东西。
+   经验只按「谁补的最后一刀」算 —— 谁杀的谁长，不吃队友的战功。 */
+const HERO_XP = [0, 40, 110, 220, 380];        // 升到下一级所需经验，按当前等级索引
+function heroXpGain(foe){                       // 击杀一个敌兵给多少经验：看它的品阶
+  return 6 + 5 * ((foe && foe.level ? foe.level : 1) - 1);
+}
+function heroMaxLv(u){ return (HEROES[u.type] && HERO_MAXLV[HEROES[u.type].r]) || 5; }
+function heroXpNeed(u){ return HERO_XP[u.level] || 0; }
+/* 记一次经验，返回这次升了几阶（0 = 没升） */
+function addHeroXp(u, foe, mine){
+  if (!u || u.kind !== 'hero' || !HEROES[u.type]) return 0;
+  const cap = heroMaxLv(u);
+  if (u.level >= cap) return 0;
+  u.xp = (u.xp || 0) + heroXpGain(foe);
+  let up = 0;
+  while (u.level < cap && u.xp >= heroXpNeed(u)){ u.xp -= heroXpNeed(u); u.level++; up++; }
+  if (!up) return 0;
+  // 升阶：按新等级重算三维，顺手回满血
+  const h = HEROES[u.type];
+  u.maxHp = Math.round(h.hp * heroHpMul(u.level));
+  u.hp = u.maxHp;
+  u.atk = Math.round(h.atk * heroAtkMul(u.level));
+  u.rate = h.rate * heroRateMul(u.level);
+  const p = unitPos(u, mine ? Y_MINE : Y_ENEMY);
+  burst(p.x, p.y, 22, GOLD);
+  floater(p.x, p.y - 44, 'Lv.' + u.level, mine ? GOLD : SEAL);
+  toast((mine ? '' : '电脑 ') + u.type + ' 升到 ' + u.level + ' 阶！');
+  sfx('hero');
+  return up;
+}
+/* 打一下 + 结算经验：所有「守军打行军兵」的伤害都走这里 */
+function dealFrom(u, e, d, mine){
+  if (!e || e.hp <= 0) return;
+  damageMarcher(e, d, mine ? 'me' : 'ai');
+  if (e.hp <= 0) addHeroXp(u, e, mine);
+}
+// 单字 -> 可组成的武将
+const CHAR_HERO = {};
+for (const n in HEROES){
+  const h = HEROES[n];
+  (CHAR_HERO[h.a] = CHAR_HERO[h.a] || []).push(n);
+  (CHAR_HERO[h.b] = CHAR_HERO[h.b] || []).push(n);
+}
+const HERO_CHARS = Object.keys(CHAR_HERO);   // 全部单字（去重后 14 个），只用于文案/调试；发牌走字池
+
+/* ---------------- 武将文字池 ----------------
+   一局只发一次：把 12 个名将的名字全部拆成单字，洗成一池（24 张），
+   发一张就少一张，本局不再回池。
+   同一个字在池里有几张，取决于有几个名将的名字用到它 ——
+   「关」×3（关羽/关兴/关平）、「张」×3（张飞/张苞/张翼）、「黄」×3（黄忠/黄祖/黄盖），
+   其余各 ×1。
+   所以「羽」在一池里只有一张：一轮里最多只能召出一个关羽。
+   一轮摸空（24 张发完）后自动重洗，恢复成完整的 24 张重新开始 ——
+   双方共用同一个池，谁摸到算谁的。 */
+const HERO_CHAR_POOL0 = [];
+for (const n in HEROES) HERO_CHAR_POOL0.push(HEROES[n].a, HEROES[n].b);
+function shuffleInPlace(a){
+  for (let i = a.length - 1; i > 0; i--){
+    const j = (Math.random() * (i + 1)) | 0;
+    const t = a[i]; a[i] = a[j]; a[j] = t;
+  }
+  return a;
+}
+/* 从池子里摸走一张指定的字（摸不到返回 false） */
+function takePoolChar(c){
+  const i = G.charPool ? G.charPool.indexOf(c) : -1;
+  if (i < 0) return false;
+  G.charPool.splice(i, 1);
+  return true;
+}
+/* 从池子里随机摸一张：preferGold = 优先摸金将的字（招贤被动） */
+const GOLD_CHARS = [];
+for (const n of GOLD_HEROES) GOLD_CHARS.push(HEROES[n].a, HEROES[n].b);
+/* 一轮 24 张摸空 -> 重新洗满。返回 true 表示这次是重洗后才发的牌 */
+function refillPool(){
+  G.charPool = shuffleInPlace(HERO_CHAR_POOL0.slice());
+  G.poolRound = (G.poolRound || 1) + 1;
+  return true;
+}
+function drawPoolChar(preferGold){
+  let pool = G.charPool || (G.charPool = []);
+  if (!pool.length){ refillPool(); pool = G.charPool; }
+  if (!pool.length) return null;
+  let idx = -1;
+  if (preferGold){
+    const g = [];
+    for (let i = 0; i < pool.length; i++) if (GOLD_CHARS.indexOf(pool[i]) >= 0) g.push(i);
+    if (g.length) idx = g[(Math.random() * g.length) | 0];
+  }
+  if (idx < 0) idx = (Math.random() * pool.length) | 0;
+  return pool.splice(idx, 1)[0];
+}
+
+/* ---------------- 羁绊 ---------------- */
+const BONDS = [
+  { id:'danqi',  name:'单骑救主', need:['赵云'],            desc:'赵云在场，全队防御 +30%',  def:0.30 },
+  { id:'wshuang',name:'万人敌',   need:['关羽','张飞'],      desc:'关羽张飞同场，全队攻击 +25%', atk:0.25 },
+  { id:'wuhu',   name:'五虎上将', need:['赵云','关羽','张飞','黄忠','马超'], desc:'五虎齐聚，全队攻击 +50%、防御 +30%', atk:0.50, def:0.30 },
+  { id:'taoyuan',name:'桃园结义', need:['刘备','关羽','张飞'], desc:'桃园三兄弟同场，每秒回复 1.5% 生命', regen:0.015 },
+];
+
+/* ---------------- 道具 ---------------- */
+const ITEMS = {
+  shenbing: { name:'神兵符', icon:'符', type:'active', cost:9,  desc:'全队无敌 6 秒',   rarity:'gold' },
+  dabowu:   { name:'大补丸', icon:'丸', type:'active', cost:8,  desc:'我方阿斗回复 1 命', rarity:'purple' },
+  maobi:    { name:'毛笔',   icon:'笔', type:'active', cost:6,  desc:'把一张手牌改成指定单字', rarity:'blue' },
+  zhaoxian: { name:'招贤令', icon:'令', type:'passive',cost:8,  desc:'金将掉落率翻倍（永久）', rarity:'gold' },
+  nongmin:  { name:'农夫',   icon:'农', type:'passive',cost:5,  desc:'击杀敌兵所得馒头 +35%（永久）',  rarity:'green' },
+  luoyang:  { name:'洛阳铲', icon:'铲', type:'passive',cost:6,  desc:'每波额外获得 1 把铲子（永久）', rarity:'blue' },
+  bingshu:  { name:'兵书残卷',icon:'书', type:'passive',cost:10, desc:'全队攻击 +20%（永久）', rarity:'purple' },
+  liangcao: { name:'粮草补给',icon:'粮', type:'passive',cost:7,  desc:'馒头产出 +20%、阿斗上限 +1 命', rarity:'purple' },
+};
+const SHOP_POOL = ['shenbing','dabowu','maobi','zhaoxian','nongmin','luoyang','bingshu','liangcao'];
+
+/* ---------------- 敌方没有专属兵种 ----------------
+   原来这里有一张 ENEMY 表（步卒 / 曹骑 / 曹弓 / 盾卒 / 损耗兵 / 敌将），
+   现在全部删除：电脑派来的兵就是上面 UNITS 那四个基础兵，靠「品阶」表达强度。
+   强度整条链只有两个旋钮：
+     waveTier(n)  每 4 波把来兵的品阶 +1（1 阶新兵 → 5 阶精锐，封顶 5）
+     MARCH_SCALE  出征兵的系数：同一套兵，派出去的是征发的兵，不是留在盘上的精锐
+   想让整体变难/变易，只动这两个数，别去改兵种表。 */
+
+/* ---------------- 工具 ---------------- */
+const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
+const pick  = a => a[(Math.random()*a.length)|0];
+const rnd   = (a,b) => a + Math.random()*(b-a);
+function rr(c,x,y,w,h,r){
+  c.beginPath();
+  c.moveTo(x+r,y); c.lineTo(x+w-r,y); c.quadraticCurveTo(x+w,y,x+w,y+r);
+  c.lineTo(x+w,y+h-r); c.quadraticCurveTo(x+w,y+h,x+w-r,y+h);
+  c.lineTo(x+r,y+h); c.quadraticCurveTo(x,y+h,x,y+h-r);
+  c.lineTo(x,y+r); c.quadraticCurveTo(x,y,x+r,y); c.closePath();
+}
+function inRect(p,r){ return p.x>=r.x && p.x<=r.x+r.w && p.y>=r.y && p.y<=r.y+r.h; }
+function cellCX(c){ return BX + c*CELL + CELL/2; }
+function cellCY(c,r,baseY){ return baseY + r*CELL + CELL/2; }
+function colOf(cell){ return cell % COLS; }
+function rowOf(cell){ return (cell / COLS) | 0; }
+
+/* ---------------- 音效 ---------------- */
+let AC = null, muted = false;
+function sfx(kind){
+  if (muted) return;
+  try{
+    if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)();
+    const t = AC.currentTime;
+    const o = AC.createOscillator(), g = AC.createGain();
+    o.connect(g); g.connect(AC.destination);
+    let f0 = 440, f1 = 440, dur = .08, type = 'sine', vol = .05;
+    if (kind==='click'){ f0=620; f1=760; dur=.06; type='triangle'; }
+    else if (kind==='enlist'){ f0=520; f1=880; dur=.12; type='triangle'; }
+    else if (kind==='merge'){ f0=380; f1=900; dur=.16; type='sine'; }
+    else if (kind==='hero'){ f0=300; f1=1200; dur=.42; type='sawtooth'; vol=.07; }
+    else if (kind==='hit'){ f0=180; f1=90;  dur=.05; type='square'; vol=.03; }
+    else if (kind==='lost'){ f0=300; f1=120; dur=.30; type='sawtooth'; vol=.07; }
+    else if (kind==='buy'){ f0=700; f1=1100; dur=.14; type='triangle'; }
+    else if (kind==='win'){ f0=520; f1=1320; dur=.5; type='triangle'; vol=.07; }
+    o.type = type;
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.exponentialRampToValueAtTime(f1, t+dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(.0001, t+dur);
+    o.start(t); o.stop(t+dur+.02);
+  }catch(e){}
+}
+
+/* ============================================================
+   状态
+   ============================================================ */
+let G = null;
+
+/* ------------------------------------------------------------
+   格子占用：名将横占两个相邻格（左格第一个字、右格第二个字）
+   普通兵 / 单字 只占一格。u.cell 是锚点格，u.cells 是全部占用格。
+   ------------------------------------------------------------ */
+function unitCells(u){ return u && u.cells ? u.cells : [u ? u.cell : 0]; }
+function isAnchor(u, i){ return !u.cells || u.cells[0] === i; }
+/* 单位的中心坐标（名将取两格中间） */
+function unitPos(u, baseY){
+  const cs = unitCells(u);
+  let sx = 0;
+  for (const i of cs) sx += cellCX(colOf(i));
+  const i0 = cs[0];
+  return { x: sx / cs.length, y: cellCY(colOf(i0), rowOf(i0), baseY) };
+}
+/* 单位占据的像素宽度 */
+function unitW(u){ return unitCells(u).length * CELL - 12; }
+/* 遍历棋盘上的「单位」（名将只算一次） */
+function eachUnit(board, fn){
+  for (let i = 0; i < board.length; i++){
+    const u = board[i];
+    if (!u || u.hp <= 0) continue;
+    if (!isAnchor(u, i)) continue;
+    fn(u, i);
+  }
+}
+function boardCount(board){
+  let n = 0; eachUnit(board, () => n++); return n;
+}
+/* 清掉某个格的单位（名将连同另一格一起清） */
+function clearCells(board, idx){
+  const u = board[idx];
+  if (!u){ board[idx] = null; return; }
+  for (const i of unitCells(u)) board[i] = null;
+}
+
+/* 名将拆字：一张名将牌其实是两个单字横拼在一起的。
+   抓走中间的一个字，另一个字留在原地，武将当场解除 ——
+   于是名将既能挪位置，也能把字拆出来去凑别的名将。 */
+function splitHero(idx){
+  const u = G.board[idx];
+  if (!u || u.kind !== 'hero' || !u.cells || u.cells.length < 2) return null;
+  const h = HEROES[u.type];
+  const c0 = u.cells[0], c1 = u.cells[1];
+  const p = unitPos(u, Y_MINE);
+  G.board[c0] = { kind:'char', char:h.a, hp:1, maxHp:1, level:0, cell:c0, cells:[c0], born:0 };
+  G.board[c1] = { kind:'char', char:h.b, hp:1, maxHp:1, level:0, cell:c1, cells:[c1], born:0 };
+  burst(p.x, p.y, 14, GOLD);
+  floater(p.x, p.y - 30, '名将解除 · 拆成两个字', INK2);
+  return u.type;
+}
+
+function newUnit(type, lv, cell, cells){
+  const isHero = !!HEROES[type];
+  if (isHero){
+    const h = HEROES[type];
+    const hp = Math.round(h.hp * heroHpMul(lv)), atk = Math.round(h.atk * heroAtkMul(lv));
+    const cs = cells || [cell, cell + 1];
+    return { kind:'hero', type, hero:type, char:type[0], level:lv, rank:h.r,
+             hp, maxHp:hp, atk, rate:h.rate * heroRateMul(lv), range:h.range,
+             cells:cs, cell:cs[0], span:cs.length, xp:0,
+             cd:0, skCd:3, flash:0, swing:0, born:0,
+             skill:h.skill, sk:h.sk, skDesc:h.skDesc };
+  }
+  const u = UNITS[type] || FUSE[type];
+  const st = TIER[lv] || TIER[1];
+  const hp = Math.round(u.hp*st.hpMul), atk = Math.round(u.atk*st.atkMul);
+  return { kind:'unit', type, char:u.char, name:u.name, level:lv,
+           fused: !UNITS[type], desc:u.desc, kindOf:u.kind,
+           hp, maxHp:hp, atk, rate:u.rate * st.rateMul, range:u.range,
+           cd:0, flash:0, swing:0, born:0, cell, cells:[cell],
+           mantou:u.mantou ? u.mantou*(1 + (lv-1)*0.6) : 0, vs:u.vs || [] };
+}
+function fuseUnit(key, lv, cell){
+  const u = FUSE[key];
+  const st = TIER[lv] || TIER[1];
+  const hp = Math.round(u.hp*st.hpMul), atk = Math.round(u.atk*st.atkMul);
+  return { kind:'unit', type:key, char:u.char, name:u.name, level:lv, fused:true,
+           desc:u.desc, kindOf:u.kind,
+           hp, maxHp:hp, atk, rate:u.rate * st.rateMul, range:u.range,
+           cd:0, flash:0, swing:0, born:0, cell, cells:[cell], mantou:0, vs:u.vs || [] };
+}
+
+/* 名将落位：找一个能横放两格的锚点
+   allow：允许被占用的格（合成时目标格 / 来源格本身） */
+function findHeroSpan(idx, board, mine, allow){
+  const c = colOf(idx), r = rowOf(idx);
+  const opts = [[idx, idx + 1], [idx - 1, idx]];
+  for (const pair of opts){
+    const a = pair[0], b = pair[1];
+    if (rowOf(a) !== r || rowOf(b) !== r) continue;
+    if (colOf(b) !== colOf(a) + 1) continue;
+    if (colOf(a) < 0 || colOf(b) >= COLS) continue;
+    let ok = true;
+    for (const i of pair){
+      if (i < 0 || i >= board.length){ ok = false; break; }
+      if (isPathCell(i, mine)){ ok = false; break; }
+      if (isAduCell(i, mine)){ ok = false; break; }
+      if (!mine && !aiLandOK(i)){ ok = false; break; }
+      if (mine && !G.unlocked[i]){ ok = false; break; }
+      if (board[i] && !(allow && allow.indexOf(i) >= 0)){ ok = false; break; }
+    }
+    if (ok) return pair;
+  }
+  return null;
+}
+
+/* 相邻两字自动成将：同一排左右紧挨着的两张单字牌，只要拼得出名将，就地合成。
+   不用把第二个字拖到第一个字上 —— 摆到旁边就自动归位。
+   每次落子 / 换位之后扫一遍（连扫几次，一次落子可能牵动好几对）。 */
+function autoFormHeroes(board, mine){
+  let formed = 0;
+  for (let guard = 0; guard < 10; guard++){
+    let hit = false;
+    for (let r = 0; r < ROWS && !hit; r++){
+      for (let c = 0; c < COLS - 1; c++){
+        const a = c + r*COLS, b = a + 1;
+        const ua = board[a], ub = board[b];
+        if (!ua || !ub) continue;
+        if (ua.kind !== 'char' || ub.kind !== 'char') continue;
+        if (!isAnchor(ua, a) || !isAnchor(ub, b)) continue;
+        const comb = tryCombine(ua, ub);          // 单字 + 单字 -> 名将
+        if (!comb || comb.kind !== 'hero') continue;
+        // 这两格正好就是名将的横跨位
+        clearCells(board, a);
+        const nb = newUnit(comb.type, comb.level, a, [a, b]);
+        nb.born = 0;
+        for (const i of [a, b]) board[i] = nb;
+        const baseY = mine ? Y_MINE : Y_ENEMY;
+        const cx = (cellCX(c) + cellCX(c + 1)) / 2;
+        const cy = cellCY(c, r, baseY);
+        burst(cx, cy, 26, GOLD);
+        floater(cx, cy - 34, comb.type + '！', GOLD);
+        sfx('hero');
+        if (mine){
+          toast('两字相邻 · ' + comb.type + '「' + HEROES[comb.type].sk + '」自动归位');
+          refreshBonds();
+        } else {
+          refreshAiBonds();
+        }
+        hit = true; formed++;
+        break;
+      }
+    }
+    if (!hit) break;
+  }
+  if (mine && formed) ensureMyBuffs();   // 刚落位的名将也要吃到我方加成
+  return formed;
+}
+
+function newGame(){
+  G = {
+    phase:'intro',          // intro | prep | battle | shop | over
+    paused:false,           // 手动暂停：全场冻结
+    vsAI:true,              // 人机对战（可暂停）／将来真人对战置 false 即禁用暂停
+    t:0, time:0,
+    mantou:8,               // 开局军费：刚好够征一次兵
+    enlistCost:5,           // 征兵费：5 起，每征一次 +1，只涨不降
+    hand:[],
+    board:new Array(COLS*ROWS).fill(null),
+    unlocked:{},            // cell -> true
+    marchers:[],            // 路上所有行军的兵（双方共用，用 owner 区分）
+    fx:[],
+    parts:[],
+    floaters:[],
+    myLife:3, myMax:3,
+    enLife:3, enMax:3,
+    wave:0, waveT:0, spawnLeft:0, spawnGap:0, spawnQueue:[],
+    aiSpawnLeft:0, aiSpawnGap:0, aiSpawnQueue:[],   // 电脑派下来的进攻部队（上半场）
+    kills:0, merit:0, meritNeed:21, leaks:0, aiLeaks:0,
+    aduShield:0,            // 无敌计时
+    passive:{},             // 被动道具
+    actives:[],             // 主动道具槽
+    shovelBonus:0,
+    shopT:44, shopOpen:false, shopStock:[],
+    dragger:null,
+    inspect:null,           // 点击查看的兵种详情
+    toast:'', toastT:0,
+    result:null,
+    bondOn:{},
+    enBoard:new Array(COLS*ROWS).fill(null),   // 电脑对手的布阵（上半场）
+    // 电脑对手按玩家同一套规则运行：馒头只来自杀敌、一次刷新 5 格手牌、同种升阶（等级可差 1 阶，异字合成默认关闭）
+    ai:{ mantou:8, cost:5, merit:0, meritNeed:21, hand:[], t:0, kills:0, passive:{}, actives:[] },
+    aiBondOn:{}, aiShield:0,
+    aiUnlocked:{},          // 电脑自己开垦出来的格子
+    prepT:0, aiT:0,
+    poolRound:1,            // 字池第几轮（摸空一次 +1）
+  };
+  // 每局重掷一张地图（两边共用一张，上下镜像），再按这张图发熟地
+  genMap();
+  // 开局只发 START_OPEN 格熟地，其余都要用铲子挖（电脑半场用同一张名单的镜像）
+  computeFreeLand();
+  for (const k in FREE_M) G.unlocked[k] = true;
+
+  // 武将文字池：每局洗一次，发完就没有了
+  G.charPool = shuffleInPlace(HERO_CHAR_POOL0.slice());
+
+  // 开局白送一次征兵：前三个格子保底（刀/弓/铲），剩下两个随机发。
+  // 注意顺序：先摆保底再摸随机牌 —— 以前是先发 5 张再覆盖前三格，
+  // 被覆盖掉的那几张（可能是字牌）等于从字池里凭空蒸发了。
+  G.hand = [
+    { kind:'unit', type:'dao', char:'刀', level:1 },
+    { kind:'unit', type:'gong', char:'弓', level:1 },
+    { kind:'shovel' },
+  ];
+  for (let i = 3; i < HAND_N; i++) G.hand.push(rollTile());
+  // 电脑的开局手牌与玩家完全对称（同一套发牌 + 同一把保底铲子），
+  // 否则它第一手只能先花 5 个馒头去征兵，起步就比玩家少一整手。
+  G.ai.hand = [
+    { kind:'unit', type:'dao', char:'刀', level:1 },
+    { kind:'unit', type:'gong', char:'弓', level:1 },
+    { kind:'shovel' },
+  ];
+  for (let i = 3; i < HAND_N; i++) G.ai.hand.push(aiRollTile());
+  refreshBonds();
+  return G;
+}
+
+/* ---------------- 羁绊结算 ---------------- */
+function activeHeroNames(){
+  const s = {};
+  for (const u of G.board) if (u && u.kind==='hero') s[u.type] = true;
+  return s;
+}
+/* ---------------- 羁绊与被动：一份公式，两种归属 ----------------
+   以前 bondAtk/bondDef/bondRegen/globalAtk/mantouMul 各有一套 ai 版本，
+   10 个函数抄两遍，改一边忘一边就会出现「电脑羁绊不生效」这种暗坑。
+   现在全部收成 bondMul(kind, mine) 与 atkMulOf/mantouMulOf(who)。 */
+function refreshBondsOf(mine){
+  const have = mine ? activeHeroNames() : {};
+  if (!mine) for (const u of G.enBoard) if (u && u.kind === 'hero') have[u.type] = true;
+  const on = {};
+  for (const b of BONDS) if (b.need.every(n => have[n])) on[b.id] = true;
+  if (mine) G.bondOn = on; else G.aiBondOn = on;
+}
+function refreshBonds(){ refreshBondsOf(true); }
+function refreshAiBonds(){ refreshBondsOf(false); }
+function bondMul(kind, mine){
+  const on = (mine ? G.bondOn : G.aiBondOn) || {};
+  let m = (kind === 'regen') ? 0 : 1;
+  for (const b of BONDS) if (on[b.id] && b[kind]) m += b[kind];
+  return m;
+}
+function bondAtk(){ return bondMul('atk', true); }
+function bondDef(){ return bondMul('def', true); }
+function bondRegen(){ return bondMul('regen', true); }
+function aiBondAtk(){ return bondMul('atk', false); }
+function aiBondDef(){ return bondMul('def', false); }
+function aiBondRegen(){ return bondMul('regen', false); }
+function globalAtk(){
+  let m = bondMul('atk', true);
+  if (G.passive.bingshu) m += 0.20;
+  return m;
+}
+function mantouMul(){
+  const p = G.passive;
+  let m = 1;
+  if (p.nongmin) m += 0.35;
+  if (p.liangcao) m += 0.20;
+  return m;
+}
+/* 电脑版：与上面两个函数一字不差，只换了归属 */
+function aiAtkMul(){ return bondMul('atk', false) + (G.ai.passive.bingshu ? 0.20 : 0); }
+function aiMantouMul(){
+  const p = G.ai.passive;
+  let m = 1;
+  if (p.nongmin) m += 0.35;
+  if (p.liangcao) m += 0.20;
+  return m;
+}
+
+/* ============================================================
+   提示 / 飘字
+   ============================================================ */
+function toast(msg){ G.toast = msg; G.toastT = 1.7; }
+function floater(x, y, text, color){
+  G.floaters.push({ x, y, text, color: color || INK, t:0, dur:0.95 });
+}
+function burst(x, y, n, color){
+  for (let i=0;i<n;i++){
+    const a = Math.random()*Math.PI*2, s = rnd(30,140);
+    G.parts.push({ x, y, vx:Math.cos(a)*s, vy:Math.sin(a)*s - 40, t:0, dur:rnd(.35,.7),
+                   r:rnd(2,5), color: color || INK });
+  }
+}
+
+/* ============================================================
+   征兵 / 手牌
+   ============================================================ */
+/* 征兵发牌：铲子 / 单字 / 1 级兵 三种。
+   一律只发 1 级兵 —— 升阶是玩家自己叠出来的，不是抽出来的：
+   手里凭空冒出一张 2、3 级牌，会让「合成」这条主线变得没意义，
+   也会让脸黑的玩家整局 1 级打 3 级。双方同一条发牌表。 */
+function rollTile(){
+  const r = Math.random();
+  if (r < SHOVEL_RATE) return { kind:'shovel' };
+  if (Math.random() < 0.30){
+    const ch = pickHeroChar();
+    if (ch) return { kind:'char', char: ch };     // 池子空了就改发兵
+  }
+  return { kind:'unit', type: pick(BASE_KEYS), level: 1 };
+}
+
+/* 摸一张武将单字：从本局的字池里拿，拿走就没了。
+   手里已经攥着半个名字时，优先补它的另一半（手感上「快凑齐了」），
+   但另一半如果早被别人摸走了，就只能摸别的 —— 池子是硬约束。 */
+function pickHeroChar(){
+  if (!G.charPool || !G.charPool.length){
+    refillPool();
+    toast('字池摸空 · 重新洗入 24 张');
+  }
+  const held = [];
+  for (const t of G.hand) if (t && t.kind==='char') held.push(t.char);
+  for (const u of G.board) if (u && u.kind==='char') held.push(u.char);
+
+  if (held.length && Math.random() < 0.66){
+    const cand = [];
+    for (const c of held){
+      for (const n of GOLD_HEROES){
+        const h = HEROES[n];
+        if (h.a === c && G.charPool.indexOf(h.b) >= 0) cand.push(h.b);
+        if (h.b === c && G.charPool.indexOf(h.a) >= 0) cand.push(h.a);
+      }
+    }
+    if (cand.length){
+      const c = pick(cand);
+      if (takePoolChar(c)) return c;
+    }
+  }
+  return drawPoolChar(Math.random() < (G.passive.zhaoxian ? 0.88 : 0.74));
+}
+
+/* 旧字牌回收价值：等级越高回收越多（原版：点征兵会自动回收旧兵） */
+function recycleValue(t){
+  if (!t) return 0;
+  if (t.kind === 'unit')  return 1 + (t.level - 1) * 2;   // 卒1 士3 校5 尉7 将9
+  if (t.kind === 'hero')  return 2 + (t.level - 1) * 2;   // 名将 2/4/6
+  if (t.kind === 'char')  return 1;
+  return 1;                                               // 铲子
+}
+
+/* 兵营是「固定 5 个格子」，不是队列：用掉一格就留个空洞，
+   后面的牌不会左移（以前用 splice 删，右边整排会滑过来，玩家以为牌被吃了）。
+   往兵营里放牌一律走这里：先补空洞，满了才算放不下。 */
+function handAdd(t){
+  if (!t) return false;
+  for (let i = 0; i < HAND_N; i++){
+    if (!G.hand[i]){ G.hand[i] = t; return true; }
+  }
+  return false;
+}
+function handHasRoom(){
+  for (let i = 0; i < HAND_N; i++) if (!G.hand[i]) return true;
+  return false;
+}
+
+/* 征兵：一次性把兵营 5 个格子全部刷新（旧牌自动回收成馒头） */
+/* 自家路上某一格的中心；这一格是不是还空着（一格只站一个待命兵） */
+function roadCellPos(cell, mine){
+  const baseY = mine ? Y_MINE : Y_ENEMY;
+  return { x: cellCX(colOf(cell)), y: cellCY(colOf(cell), rowOf(cell), baseY) };
+}
+function roadCellFree(cx, cy){
+  for (const m of G.marchers){
+    if (Math.hypot(m.x - cx, m.y - cy) < CELL * 0.62) return false;
+  }
+  return true;
+}
+/* 自家路上还能站几个待命兵（出兵格不算，它必须空着） */
+function freeRoadSlots(owner){
+  const mine = owner !== 'ai';
+  const cells = mine ? PATH_CELLS_M : PATH_CELLS_E;
+  let n = 0;
+  for (let k = 1; k < cells.length; k++){
+    const p = roadCellPos(cells[k], mine);
+    if (roadCellFree(p.x, p.y)) n++;
+  }
+  return n;
+}
+/* 把兵营里的一张牌送上路（从路尾往前找空位，一格一个）：
+   兵 —— 原兵种、原阶直接排进队列，不打折；
+   字 —— 字本身 1 血不能打，换成一个随机 1 级兵再上路；
+   名将 / 铲子 —— 上不了路（名将占两格），返回 null，由调用方折馒头。 */
+function sendTileToRoad(owner, tile){
+  if (!tile) return null;
+  let key = null, lv = 1;
+  if (tile.kind === 'unit'){ key = tile.type; lv = tile.level || 1; }
+  else if (tile.kind === 'char'){ key = pick(BASE_KEYS); lv = 1; }
+  else return null;
+  const mine = owner !== 'ai';
+  const cells = mine ? PATH_CELLS_M : PATH_CELLS_E;
+  for (let k = cells.length - 1; k >= 1; k--){
+    const cell = cells[k];
+    const p = roadCellPos(cell, mine);
+    if (!roadCellFree(p.x, p.y)) continue;
+    const m = spawnRaider(mine ? 'me' : 'ai', cell, key, lv);
+    if (m){ burst(m.x, m.y, 12, mine ? GOLD : SEAL); return m; }
+  }
+  return null;
+}
+/* 旧名字：只送一个「字」上路（别的调用点还在用） */
+function sendCharToRoad(owner){ return sendTileToRoad(owner, { kind:'char' }); }
+
+/* 征兵的核心：把某一侧兵营的 5 格一次性刷新。
+   规则（两侧一字不差）：
+     1) 兵营里的牌先全部「上路」—— 兵保留兵种与阶，字换成随机 1 级兵；
+     2) 上不了路的（名将占两格、铲子不是兵）或者路挤满放不下的，折成馒头；
+     3) 判定看净支出：馒头 + 折价 >= 标价才动手，动手才涨价。 */
+function enlistSide(mine){
+  const S = sideInfo(mine);
+  const hand = S.hand;
+  const cost = mine ? G.enlistCost : G.ai.cost;
+  const roll = mine ? rollTile : aiRollTile;
+
+  // 先规划：按手牌顺序分配「上路」名额，剩下的折馒头
+  let free = freeRoadSlots(mine ? 'me' : 'ai');
+  const plan = [];
+  let refund = 0;
+  for (const t of hand){
+    if (!t){ plan.push(0); continue; }
+    const canRoad = (t.kind === 'unit' || t.kind === 'char') && free > 0;
+    if (canRoad){ free--; plan.push(1); }      // 1 = 上路
+    else { plan.push(2); refund += recycleValue(t); }   // 2 = 折馒头
+  }
+  if (moneyOf(mine) + refund < cost) return { ok:false, sent:0, refund:0 };
+
+  let sent = 0, folded = 0;
+  for (let i = 0; i < hand.length; i++){
+    const t = hand[i];
+    if (!t) continue;
+    hand[i] = null;
+    if (plan[i] === 1 && sendTileToRoad(mine ? 'me' : 'ai', t)) sent++;
+    else folded += recycleValue(t);          // 路挤满了 / 本来上不了路
+  }
+
+  addMoney(mine, -cost + folded);
+  hand.length = 0;
+  for (let i = 0; i < HAND_N; i++) hand.push(roll());
+  if (mine) G.enlistCost += 1; else G.ai.cost += 1;
+  return { ok:true, sent, refund: folded };
+}
+function moneyOf(mine){ return mine ? G.mantou : G.ai.mantou; }
+function addMoney(mine, v){ if (mine) G.mantou += v; else G.ai.mantou += v; }
+
+function enlist(){
+  if (G.phase !== 'battle' && G.phase !== 'prep') return;
+  const r = enlistSide(true);
+  if (!r.ok){ toast('馒头不够 · 杀敌才有军费'); sfx('hit'); return; }
+  sfx('enlist');
+  const bits = [];
+  if (r.sent) bits.push(r.sent + ' 张上路人列队');
+  if (r.refund > 0) bits.push('折 +' + r.refund + ' 馒头');
+  toast('征兵 · 刷新 5 格' + (bits.length ? '（' + bits.join(' · ') + '）' : ''));
+}
+
+/* ============================================================
+   棋盘操作：放置 / 合成 / 开垦
+   ============================================================ */
+function tileChar(t){
+  if (t.kind === 'shovel') return '铲';
+  if (t.kind === 'char') return t.char;
+  if (t.kind === 'hero') return t.type;
+  const u = UNITS[t.type] || FUSE[t.type];
+  return u ? u.char : '?';
+}
+function tileLabel(t){
+  if (t.kind === 'unit'){ const u = UNITS[t.type] || FUSE[t.type]; return u.name; }
+  if (t.kind === 'char')  return '武将单字';
+  if (t.kind === 'hero')  return t.type;
+  return '铲子';
+}
+
+// 两个物件能否合成，返回合成结果或 null
+function tryCombine(a, b){
+  // 武将单字 + 武将单字 -> 名将
+  if (a.kind === 'char' && b.kind === 'char'){
+    let found = null;
+    for (const n in HEROES){
+      const h = HEROES[n];
+      if ((h.a === a.char && h.b === b.char) || (h.a === b.char && h.b === a.char)){ found = n; break; }
+    }
+    if (found) return { kind:'hero', type:found, level:1 };
+    return null;
+  }
+  // 名将 + 同名名将 -> 升阶
+  if (a.kind === 'hero' && b.kind === 'hero' && a.type === b.type && a.level === b.level){
+    if (a.level >= HERO_MAXLV[HEROES[a.type].r]) return null;
+    return { kind:'hero', type:a.type, level: a.level + 1 };
+  }
+  // 普通兵：同种 + 同阶才能合，结果 +1 阶（1+1=2、2+2=3 …）。
+  // 曾经允许「阶差 ≤1」也能合，结果是 1级+2级 直接变 3 级 ——
+  // 玩家看到的是「同一手牌有时能合、有时不能」，而 2+3 又只给 4 级，
+  // 跟自己数出来的账对不上。规则只留一条：两个一模一样的东西叠起来升一阶。
+  if (a.kind === 'unit' && b.kind === 'unit'){
+    if (a.type === b.type && a.level === b.level){
+      const lv = a.level + 1;
+      if (lv > MAX_TIER) return null;
+      return { kind:'unit', type:a.type, level: lv };
+    }
+    // 异字合成（默认关闭，见 FUSE_ON）
+    if (FUSE_ON && a.level === b.level && a.level === 1){
+      const k = fuseKey(a.type, b.type);
+      if (k) return { kind:'unit', type:k, level:1 };
+    }
+  }
+  return null;
+}
+
+function toUnitObject(t, cell, cells){
+  if (t.kind === 'char') return { kind:'char', char:t.char, hp:1, maxHp:1, level:0, cell, cells:[cell], born:0 };
+  if (t.kind === 'hero') return newUnit(t.type, t.level, cell, cells);
+  if (t.kind === 'unit') return newUnit(t.type, t.level, cell, cells);
+  return null;
+}
+
+/* 把来源物件放到目标格（idx）
+   成功时由本函数负责清掉来源格（棋盘来源），onUp 不再处理棋盘清除
+   返回：shovel-used | shovel-no | place | merge | swap | fail */
+function dropOnCellRaw(src, idx){
+  const c = colOf(idx), r = rowOf(idx);
+  const dst = G.board[idx];
+  const from = src.__fromBoard;
+
+  if (isAduCell(idx, true)){ toast('这是阿斗的位置 · 不能布防'); sfx('hit'); return 'fail'; }
+
+  // 铲子开垦（放在最前面：路格本来就不能开垦，但也别回一句「只有普通兵能上路出击」）
+  if (src.kind === 'shovel'){
+    if (isRoad(idx, true)){ toast('路和出兵点不能开垦'); sfx('hit'); return 'shovel-no'; }
+    if (!dst && !G.unlocked[idx]){ G.unlocked[idx] = true; sfx('merge'); burst(cellCX(c), cellCY(c,r,Y_MINE), 12, GRASS); toast('开垦一格 · 已开 ' + Object.keys(G.unlocked).length + ' 格'); return 'shovel-used'; }
+    if (G.unlocked[idx]) toast('这块地已经开垦过了'); else toast('这格已经占着了');
+    sfx('hit');
+    return 'shovel-no';
+  }
+
+  // 路格：普通兵可以上路。上路的兵不再算守军，而是先在路上列队，等下一波随军出击。
+  // 名将占两格、单字只有 1 血，都不适合上路，挡在门口说明白。
+  // 来源既可以是手牌，也可以是已经摆在格子上的兵 —— 把后排的兵挪到路上参战。
+  if (isPathCell(idx, true)){
+    if (src.kind !== 'unit'){ toast('只有普通兵能上路 · 名将与单字留在后半场'); sfx('hit'); return 'fail'; }
+    if (idx === PATH_CELLS_M[0]){ toast('出兵格要空着 · 兵排它后面一格起'); sfx('hit'); return 'fail'; }
+    const m = spawnRaider('me', idx, src.type, src.level);
+    if (!m){ toast('这一格不适合出击'); sfx('hit'); return 'fail'; }
+    if (from !== undefined){ clearCells(G.board, from); refreshBonds(); }
+    const u = UNITS[src.type];
+    burst(m.x, m.y, 14, GOLD);
+    floater(m.x, m.y - 26, '上路 · 向出兵格排队', GOLD);
+    sfx('enlist');
+    toast(from !== undefined
+      ? ('调兵 · ' + (u ? u.name : '兵') + ' 上路，正赶去出兵格后面排队，下一波随军出击')
+      : ('上路 · ' + (u ? u.name : '兵') + ' 沿路赶去出兵格后面排队，下一波随军出击'));
+    return 'place';
+  }
+
+  if (!G.unlocked[idx]){ toast('先用铲子开垦这块地'); sfx('hit'); return 'fail'; }
+
+  // 拖回自己身上 -> 什么都不做（否则会白升一阶）
+  if (from !== undefined && dst && G.board[from] === dst) return 'fail';
+
+  // ---------- 合成 ----------
+  const comb = dst ? tryCombine(src, dst) : null;
+
+  if (comb && comb.kind === 'hero'){
+    // 名将横占两个相邻格
+    const allow = [idx];
+    if (dst && dst.cells) for (const i of dst.cells) allow.push(i);
+    if (from !== undefined) allow.push(from);
+    const span = findHeroSpan(idx, G.board, true, allow);
+    if (!span){ toast('名将横占两格 · 请留出一个相邻空格'); sfx('hit'); return 'fail'; }
+    // 清掉不在 span 里的旧格（来源 / 被合成的名将另一半）
+    if (from !== undefined && span.indexOf(from) < 0) clearCells(G.board, from);
+    if (dst && dst.cells) for (const i of dst.cells) if (span.indexOf(i) < 0) G.board[i] = null;
+    const nb = newUnit(comb.type, comb.level, span[0], span);
+    nb.born = 0;
+    for (const i of span) G.board[i] = nb;
+    const cx = (cellCX(colOf(span[0])) + cellCX(colOf(span[1]))) / 2;
+    const row = rowOf(span[0]);
+    const cy = cellCY(colOf(span[0]), row, Y_MINE);
+    burst(cx, cy, 30, GOLD);
+    floater(cx, cy - 34, comb.type + '！', GOLD);
+    sfx('hero');
+    toast('名将归位 · ' + comb.type + '「' + HEROES[comb.type].sk + '」横占两格');
+    refreshBonds();
+    return 'merge';
+  }
+
+  if (comb){
+    if (from !== undefined) clearCells(G.board, from);
+    const nb = toUnitObject(comb, idx);
+    nb.born = 0;
+    G.board[idx] = nb;
+    const cx = cellCX(c), cy = cellCY(c, r, Y_MINE);
+    const isHero = comb.kind === 'hero';
+    burst(cx, cy, isHero ? 26 : 14, isHero ? GOLD : SEAL);
+    floater(cx, cy - 28, isHero ? (comb.type + '！') : (comb.level + ' 阶 · 攻↑ 速↑'),
+            isHero ? GOLD : TIER[comb.level].c);
+    sfx(isHero ? 'hero' : 'merge');
+    if (isHero) toast('名将归位 · ' + comb.type + '「' + HEROES[comb.type].sk + '」');
+    refreshBonds();
+    return 'merge';
+  }
+
+  // ---------- 空位放下 ----------
+  if (!dst){
+    const isHero = src.kind === 'hero';
+    if (isHero){
+      const span = findHeroSpan(idx, G.board, true, from !== undefined ? [from] : []);
+      if (!span){ toast('名将横占两格 · 请留出一个相邻空格'); sfx('hit'); return 'fail'; }
+      if (from !== undefined && span.indexOf(from) < 0) clearCells(G.board, from);
+      const nb = newUnit(src.type, src.level, span[0], span);
+      nb.born = 0;
+      for (const i of span) G.board[i] = nb;
+      refreshBonds(); sfx('click');
+      return 'place';
+    }
+    if (from !== undefined) clearCells(G.board, from);
+    G.board[idx] = toUnitObject(src, idx);
+    refreshBonds(); sfx('click');
+    return 'place';
+  }
+
+  // ---------- 换位：合并不成立时，拖过来的牌和格子上的守军对调 ----------
+  if (dst){
+    if (src.kind === 'unit' && dst.kind === 'unit')
+      toast('合不了 · 只能同种同阶相叠（1+1 → 2 阶）');
+    if (src.kind === 'hero'){ toast('名将占两格 · 不能和别人换位置'); sfx('hit'); return 'fail'; }
+    // 名将也能被「换字」：手里的字落到名将的半格上，那半格的字收回兵营，带来的字顶上。
+    // 关兴的「兴」格上落一个「羽」→ 兴进兵营，关+羽 相邻，落子后的 autoFormHeroes 立刻拼回关羽。
+    if (dst.kind === 'hero'){
+      if (from !== undefined){ toast('要换名将的字 · 从兵营里拖字过来'); sfx('hit'); return 'fail'; }
+      const h = HEROES[dst.type];
+      const i0 = dst.cells ? dst.cells[0] : idx, i1 = dst.cells ? dst.cells[1] : idx;
+      if (!h || (idx !== i0 && idx !== i1)){ toast('名将占两格 · 不能和别人换位置'); sfx('hit'); return 'fail'; }
+      const outChar = (idx === i0) ? h.a : h.b;          // 被顶掉的那半
+      const keepCell = (idx === i0) ? i1 : i0;           // 另一半留在原格，退回单字
+      const keepChar = (idx === i0) ? h.b : h.a;
+      G.board[i0] = null; G.board[i1] = null;
+      G.board[keepCell] = { kind:'char', char:keepChar, hp:1, maxHp:1, level:0,
+                            cell:keepCell, cells:[keepCell], born:0 };
+      G.board[idx] = toUnitObject(src, idx);
+      if (handAdd({ kind:'char', char: outChar })) toast('换字 ·「' + outChar + '」收进兵营');
+      else { G.mantou += 1; toast('兵营满了 ·「' + outChar + '」折成 1 馒头'); }
+      refreshBonds(); sfx('click');
+      return 'swap';
+    }
+    const moving = toUnitObject(src, idx);
+    if (!moving){ toast('这两个字合不到一起'); sfx('hit'); return 'fail'; }
+    if (from !== undefined){
+      // 棋盘上的两件对调
+      clearCells(G.board, from);
+      G.board[from] = dst; dst.cell = from; dst.cells = [from];
+      G.board[idx] = moving;
+    } else {
+      // 手牌落到已有守军的格子上：那位守军收回兵营
+      G.board[idx] = moving;
+      if (handAdd(dst)) toast('换位 · ' + tileLabel(dst) + ' 收进兵营');
+      else toast('换位 · 兵营满了，' + tileLabel(dst) + ' 直接遣散');
+    }
+    refreshBonds();
+    sfx('click');
+    return 'swap';
+  }
+
+  toast('这两个字合不到一起');
+  sfx('hit');
+  return 'fail';
+}
+
+/* 落子统一入口：只要真的动了棋盘（放下 / 合成 / 换位），落完再扫一遍
+   「同一排挨着的两张单字自动拼成名将」，玩家不用把第二个字拖到第一个字上 */
+function dropOnCell(src, idx){
+  const res = dropOnCellRaw(src, idx);
+  if (res === 'place' || res === 'merge' || res === 'swap'){
+    autoFormHeroes(G.board, true);
+    ensureMyBuffs();          // 新落地的守军立刻吃到我方加成（不必等下一帧）
+  }
+  return res;
+}
+
+/* ============================================================
+   波次 / 敌兵
+   ============================================================ */
+/* 敌方来兵的品阶：每 4 波 +1，封顶 5 阶。
+   品阶就是唯一的强度曲线 —— 删掉 ENEMY 表以后，不再有单独的「敌兵血量成长公式」。 */
+function waveTier(n){ return clamp(1 + Math.floor((n-1)/4), 1, MAX_TIER); }
+
+/* 出征兵的系数：同一套兵种，两边都吃这个数。
+   想整体调难度就动这一个旋钮 —— 但一旦不等于 1，两边就不再对称了。
+   只压血与攻，不压出手速度（攻速是兵种属性，出征不打折）。 */
+const MARCH_SCALE = 1;
+
+/* 行军速度的全局倍率：兵种表里的 spd 就是「格/秒」，这里给一个全局系数。
+   以前是 0.5（刀兵实际只走 0.5 格/秒），一条 20 格的路要 40 秒，
+   兵几乎是站在弓箭射程里被慢慢磨死的 —— 也是「漏头就秒」的一半原因。
+   现在放回 1.0：刀兵 1 格/秒、骑兵 1.55 格/秒，与面板显示的数字一致，
+   穿场时间 20 秒上下，玩家照样有时间补防。 */
+const MOVE_MUL = 1.0;
+
+/* 自动进攻兵的路：从 pts[k] 之后一路走到对面阿斗 */
+function forwardRoute(pts, k, adu){
+  const r = [];
+  for (let i = k + 1; i < pts.length; i++) r.push(pts[i]);
+  r.push({ x: adu.x, y: adu.y });
+  return r;
+}
+/* 出击兵的路：先沿自己半场的路往回走到中缝，过缝后沿对面半场的路打到对面阿斗。
+   两张图是上下镜像的，所以「过缝」是同列垂直跨过去，不会横跳。 */
+function raiderRoute(halfMine, k){
+  const own = pathPoints(halfMine);
+  const oth = pathPoints(!halfMine);
+  const adu = halfMine ? ADU_E : ADU_M;
+  const r = [];
+  for (let i = k - 1; i >= 0; i--) r.push(own[i]);
+  r.push(oth[0]);
+  for (let i = 1; i < oth.length; i++) r.push(oth[i]);
+  r.push({ x: adu.x, y: adu.y });
+  return r;
+}
+
+/* 每波：上下两块战场各收到一支同强度的进攻部队（一轮对攻） */
+/* 批内出兵间隔：一批里几个兵隔多久出一个（铺得均匀一点，别挤成一坨）。
+   间距跟着 MOVE_MUL 走 —— 兵走得慢了，出兵也得拉长，
+   不然同一点上会摞四五个兵，看着像一坨。 */
+function spawnGapOf(n){ return clamp((0.72 - n*0.028) / MOVE_MUL, 0.5, 1.6); }
+/* 某一侧这一波的敌兵清干净了吗：先要「这一波已经出完」，再要「场上没有还没打完的敌兵」。
+   排队待命的兵（queued）还没出击，不算在对面这一波里。
+   两边用同一个函数 —— 谁清得快谁就能把全场的节奏往前拽。 */
+function waveClearedFor(mine){
+  const S = sideInfo(mine);
+  const left = mine ? G.spawnLeft : G.aiSpawnLeft;
+  if (left > 0) return false;                 // 这一波还没出完
+  for (const m of G.marchers){
+    if (m.owner !== S.foe || m.queued) continue;
+    return false;                             // 还有敌兵在场上
+  }
+  return true;
+}
+function startWave(early){
+  G.wave++;
+  G.waveT = 0;
+  // 开战的同时放行上一波之间攒下的待命兵：它们跟着这一波一起压上去
+  const freed = releaseQueue();
+  // 注意：这里**不能**把征兵费重置回 5 —— 原来就是这一行让成本涨不上去的。
+  // 现在征兵费只升不降：开局 5，每征一次 +1，越到后期越贵。
+  if (G.passive.luoyang) handAdd({ kind:'shovel' });
+  if (G.ai.passive.luoyang) G.ai.hand.push({ kind:'shovel' });
+  const n = G.wave;
+  const lv = waveTier(n);
+  // 每批的兵力：8、9、10……（7 + 波次），每批固定间隔 WAVE_GAP 秒
+  const count = 7 + n;
+  // 批内出兵间隔：上下半场用同一条曲线，铺得均匀一点
+  const gap = spawnGapOf(n);
+
+  // 两条线同时开：我的半场收敌方来兵，电脑半场收我方自动进攻兵（同一支队伍、同一套兵）
+  G.spawnQueue = []; G.spawnLeft = count; G.spawnGap = gap;
+  G.aiSpawnQueue = []; G.aiSpawnLeft = count; G.aiSpawnGap = gap;
+  for (let i=0;i<count;i++){
+    G.spawnQueue.push(enemySpec(n));
+    G.aiSpawnQueue.push(enemySpec(n));
+  }
+  toast('第 ' + n + ' 波 · 双方同时开战（' + lv + ' 阶兵）'
+        + (early ? ' · 速清提前' : '')
+        + (freed ? ' · 待命 ' + freed + ' 兵随军出击' : ''));
+}
+
+/* 一波里出什么兵：四个基础兵，权重从「刀枪为主」慢慢过渡到「四兵混编」。
+   强度不在这里调 —— 那是 waveTier / MARCH_SCALE 的事。 */
+function enemySpec(n){
+  const lv = waveTier(n);
+  const r = Math.random();
+  let key;
+  if (n <= 2)      key = r < 0.55 ? 'dao' : (r < 0.85 ? 'qiang' : (r < 0.95 ? 'gong' : 'qi'));
+  else if (n <= 5) key = r < 0.34 ? 'dao' : (r < 0.62 ? 'qiang' : (r < 0.84 ? 'gong' : 'qi'));
+  else             key = r < 0.28 ? 'dao' : (r < 0.52 ? 'qiang' : (r < 0.76 ? 'gong' : 'qi'));
+  return { key, lv };
+}
+
+/* ---------------- 行军兵（双方共用一套） ----------------
+   owner:'ai' = 电脑的兵，从我的半场路头下来，打我的阿斗
+   owner:'me' = 我方的出击兵，从路上朝对面走，打电脑的阿斗
+   兵种、品阶、克制、血量、攻击全走 UNITS / TIER 同一张表 —— 两边没有任何数值差。 */
+function newMarcher(owner, key, level){
+  const u = UNITS[key];
+  if (!u) return null;
+  const lv = clamp(level || 1, 1, MAX_TIER);
+  const st = TIER[lv];
+  const k = MARCH_SCALE;                     // 两边同一个系数，不按 owner 分叉
+  const hp = Math.round(u.hp * st.hpMul * k);
+  return {
+    owner, key, level: lv, char: u.char, name: u.name, vs: u.vs || [],
+    hp, maxHp: hp,
+    atk: u.atk * st.atkMul * k,
+    rate: u.rate * st.rateMul,
+    range: u.range, spd: u.spd * CELL * MOVE_MUL, w: u.w, mantou: u.mantou,
+    x: 0, y: 0, route: [], ri: 0,
+    cd: 0, stun: 0, slowT: 0, hurt: 0, flash: 0, born: 0,
+    jit: (Math.random() - 0.5) * 9,
+  };
+}
+/* 自动进攻兵：owner 的兵从自己这一侧的路头出生，沿路走向对面的阿斗 */
+function spawnWave(owner, spec){
+  const m = newMarcher(owner, spec.key, spec.lv);
+  if (!m) return null;
+  const halfMine = owner === 'ai';            // 敌兵走我的半场；我的进攻兵走对面半场
+  const pts = pathPoints(halfMine);
+  const adu = halfMine ? ADU_M : ADU_E;
+  m.x = pts[0].x; m.y = pts[0].y;
+  m.route = forwardRoute(pts, 0, adu);
+  G.marchers.push(m);
+  return m;
+}
+/* 放在路格上的兵 -> 待命兵：沿自家这条路往「出兵格」方向走，一格一个往后排，
+   排头站出兵格的**下一格**（出兵格永远留空，给下一波出兵让位）；
+   下一波开战时（startWave）统一放行，跟着这一波一起越过中缝打过去。
+   排队中的兵照样会跟迎面上来的敌兵互殴 —— 站在路上就是一道人墙。
+   在我方路上越往后越熟门熟路：每前进一格，行军速度翻一倍（封顶 8 倍）。 */
+let RAIDER_SEQ = 0;                    // 入队顺序：同距离时先来的排前面
+function spawnRaider(owner, cell, key, level){
+  const halfMine = owner === 'me';
+  const cells = halfMine ? PATH_CELLS_M : PATH_CELLS_E;
+  const k = cells.indexOf(cell);
+  if (k < 0) return null;
+  if (k === 0) return null;              // 出兵格是出兵专用的，不许站兵
+  const m = newMarcher(owner, key, level);
+  if (!m) return null;
+  const baseY = halfMine ? Y_MINE : Y_ENEMY;
+  m.x = cellCX(colOf(cell));
+  m.y = cellCY(colOf(cell), rowOf(cell), baseY);
+  m.route = raiderRoute(halfMine, k);
+  m.raider = true;
+  m.queued = true;                       // 待命：等下一波
+  m.headRi = k - 1;                      // 出兵格在 route 里的下标（route[k-1] === 出兵格）
+  m.seq = ++RAIDER_SEQ;                  // 入队顺序，只用于同距离时的先后
+  G.marchers.push(m);
+  return m;
+}
+/* 沿路到「出兵格」还剩多少距离（rank 用它排序，谁靠前谁占前面的格） */
+function headRemain(m){
+  let d = 0, x = m.x, y = m.y;
+  for (let i = m.ri; i <= m.headRi; i++){
+    const p = m.route[i];
+    if (!p) break;
+    d += Math.hypot(p.x - x, p.y - y);
+    x = p.x; y = p.y;
+  }
+  return d;
+}
+/* 我在队列里排第几：离出兵格越近越靠前，同距离按上路先后 */
+function queueRank(m){
+  const dm = headRemain(m);
+  let r = 0;
+  for (const o of G.marchers){
+    if (o === m || !o.queued || o.owner !== m.owner) continue;
+    const d = headRemain(o);
+    if (d < dm - 1e-6 || (Math.abs(d - dm) <= 1e-6 && o.seq < m.seq)) r++;
+  }
+  return r;
+}
+/* 沿路到 route[idx] 那一格的距离（防止一帧冲过头） */
+function routeRemainTo(m, idx){
+  let d = 0, x = m.x, y = m.y;
+  for (let i = m.ri; i <= idx; i++){
+    const p = m.route[i];
+    if (!p) break;
+    d += Math.hypot(p.x - x, p.y - y);
+    x = p.x; y = p.y;
+  }
+  return d;
+}
+/* 我方路上：每前进一格速度翻一倍。
+   起步就给 4 倍（本来 0.5 格/秒太磨人，走一格要 2.25 秒），封顶 32 倍 = 16 格/秒，
+   一条 20 格的路从最末一格跑回出兵口也就 2 秒左右。 */
+const OWN_PATH_SPD_BASE = 4;
+const OWN_PATH_SPD_CAP = 32;
+function ownPathSpeedMul(m){
+  return Math.min(OWN_PATH_SPD_CAP, OWN_PATH_SPD_BASE * Math.pow(2, Math.max(0, m.ri)));
+}
+/* 开战：所有待命兵一起放行 */
+function releaseQueue(){
+  let n = 0;
+  for (const m of G.marchers){
+    if (!m.queued) continue;
+    m.queued = false; n++;
+    burst(m.x, m.y, 6, m.owner === 'me' ? GOLD : SEAL);
+  }
+  return n;
+}
+
+/* 沿路推进：把 e 沿折线点往前走 dist 距离。
+   capped=true 时永远走不完最后一段 —— 被守军拦住就绝对摸不到阿斗。
+   返回 true 表示已经走到路的尽头（= 摸到阿斗）。 */
+/* 敌兵当前所在的那一格（用来算「有没有守军贴在路边」） */
+
+/* 守军是不是踩在「路」上（含阿斗格）。
+   规则：只有路上的守军会被行军兵够到、被拦住；路外的守军＝后方火力，谁也打不到它。 */
+function defenderOnRoad(u, idx, mine){
+  for (const k of unitCells(u)) if (isRoad(k, mine)) return true;
+  return isRoad(idx, mine);
+}
+/* 距离检索：找出离 (x,y) 最近、落在 range 内「某一侧」的守军。
+   roadOnly = true 时只认踩在路上的守军 —— 行军兵够不到路外（后方阵地）的兵。
+   两块棋盘共用这一个函数，唯一的参数是「查哪一侧」。 */
+function nearestDefender(mine, x, y, range, roadOnly){
+  const S = sideInfo(mine);
+  let best = null, bd = 1e9;
+  for (let i = 0; i < S.board.length; i++){
+    const u = S.board[i];
+    if (!u || u.kind === 'char' || u.hp <= 0) continue;
+    if (!isAnchor(u, i)) continue;
+    if (roadOnly && !defenderOnRoad(u, i, mine)) continue;
+    const p = unitPos(u, S.baseY);
+    const d = Math.hypot(p.x - x, p.y - y);
+    if (d <= range && d < bd){ bd = d; best = { u, x: p.x, y: p.y, idx: i, d }; }
+  }
+  return best;
+}
+function nearestMyUnit(x, y, range, roadOnly){ return nearestDefender(true,  x, y, range, roadOnly); }
+function nearestAiUnit(x, y, range, roadOnly){ return nearestDefender(false, x, y, range, roadOnly); }
+/* 某一边的所有行军兵 */
+function marchersOf(owner){ return G.marchers.filter(m => m.owner === owner); }
+/* 距离检索：某个 owner 的行军兵（owner 省略 = 两边都算） */
+function nearestMarcher(x, y, range, owner, half){
+  let best = null, bd = 1e9;
+  for (const m of G.marchers){
+    if (m.hp <= 0) continue;
+    if (owner && m.owner !== owner) continue;
+    if (half === 'M' && m.y < MID1) continue;    // 只算我的半场
+    if (half === 'E' && m.y > MID1) continue;    // 只算对面半场
+    const d = Math.hypot(m.x - x, m.y - y);
+    if (d <= range && d < bd){ bd = d; best = { u:m, x:m.x, y:m.y, d }; }
+  }
+  return best;
+}
+
+/* 贴脸拦停距离：只要守军贴着路边站着，敌军就会被拦下来原地厮杀。
+   CELL=72，正交相邻两格心距 72、斜角 102 ——
+   取 81 表示「紧贴路边的正交四格」拦得停，斜角拦不住（但斜角的兵照样打得到）。 */
+const BLOCK_R = 81;
+/* 被拦住时的推挤（GRIND）已经删掉：现在是硬规则 ——
+   迎面有兵、或者贴脸有守军，走不动就是走不动，打死才能前进。 */
+/* 正在交战的敌兵推进倍率：只要射程内还有我军守军，行军速度掉到这个比例。
+   避免远程兵种（曹弓射程 250px ≈ 3.5 格）一边走一边射、还能满速滑过去 ——
+   现在它必须停下来打，打完才继续走。被我军贴脸拦住时另有 GRIND 那套。 */
+const ATK_MOVE_MUL = 0.18;
+
+/* ---------------- 守军的加减成 ----------------
+   原则：同一个兵种、同一个身份，两边必须一模一样。
+   这三个系数全部 = 1 —— 以前是玩家单方面 血×2、受伤÷2、电脑出征兵×0.6，
+   等于玩家几乎自带 4 倍有效血量，AI 只能靠波次曲线硬撑，属于用数值掩盖 AI 弱。
+   要让电脑弱一点，去动 AI 的决策（aiTick 频率、布阵打分、征兵节奏），别再动这里。 */
+const MY_HP_MUL     = 1;
+const MY_DEF_MUL    = 1;
+const MY_REGEN_IDLE = 5;      // 脱战回血：双方同一条规则
+const MY_REGEN_PCT  = 0.30;
+const MY_DEF_FLOOR  = 0.35;   // 与羁绊减伤共用的下限，别让减伤叠爆
+
+/* 给新落地的守军补上加成。幂等：一个单位只会加一次（打 buff 标记）。
+   两侧共用：mine 只是用来选棋盘，系数本身两边一模一样。
+   放在 updateSideUnits 里每帧兜底，所以不管从哪条路径摆上棋盘都吃得到。 */
+function ensureBuffs(mine){
+  const S = sideInfo(mine);
+  for (let i = 0; i < S.board.length; i++){
+    const u = S.board[i];
+    if (!u || u.kind === 'char' || u.buff) continue;
+    u.buff = true;
+    const ratio = u.maxHp > 0 ? u.hp / u.maxHp : 1;   // 换算而不是直接拉满
+    u.maxHp = Math.round(u.maxHp * MY_HP_MUL);
+    u.hp = Math.round(u.maxHp * ratio);
+    u.idleT = 0;
+    u.regenT = 0;
+  }
+}
+function ensureMyBuffs(){ ensureBuffs(true); }
+
+
+/* 沿路线往前走，返回 true 表示走到终点（= 摸到对面阿斗） */
+function marchForward(m, dist){
+  let guard = 0;
+  while (dist > 1e-6 && m.ri < m.route.length && guard++ < 12){
+    const t = m.route[m.ri];
+    const dx = t.x - m.x, dy = t.y - m.y, d = Math.hypot(dx, dy);
+    if (d <= dist){ m.x = t.x; m.y = t.y; m.ri++; dist -= d; }
+    else { m.x += dx/d*dist; m.y += dy/d*dist; dist = 0; }
+  }
+  return m.ri >= m.route.length;
+}
+/* 一个行军兵被打死：击杀方拿馒头与战功（玩家杀进玩家的账，电脑杀进电脑的账） */
+function killMarcher(m, killer){
+  const i = G.marchers.indexOf(m);
+  if (i >= 0) G.marchers.splice(i,1);
+  if (killer === 'me'){
+    // 基础 1 个馒头。这里**不取整**：农民/粮草这类被动给的是 +35%/+20%，
+    // 一取整就永远是 1，被动等于白买。馒头可以是小数，HUD 与商店判定都按 floor 显示/比较。
+    const gain = m.mantou * mantouMul();
+    G.mantou += gain; G.kills++; G.merit++;
+    floater(m.x, m.y - 18, '+' + (Math.round(gain*10)/10) + ' 馒头', GOLD);
+    burst(m.x, m.y, 8, SEAL);
+  } else {
+    aiGain(m.mantou * aiMantouMul(), m.x, m.y);
+    G.ai.kills++; G.ai.merit++;
+  }
+}
+function damageMarcher(m, d, killer){
+  if (!m || m.hp <= 0) return;
+  m.hp -= d; m.hurt = 1; m.flash = 0.25;
+  if (m.hp <= 0) killMarcher(m, killer);
+}
+/* 两个行军兵迎面撞上：谁也不能过去，各打各的，死一个才放行 */
+function nearestFoeMarcher(m, r){
+  let best = null, bd = r;
+  for (const o of G.marchers){
+    if (o === m || o.hp <= 0 || o.owner === m.owner) continue;
+    const d = Math.hypot(o.x - m.x, o.y - m.y);
+    if (d <= bd){ bd = d; best = o; }
+  }
+  return best;
+}
+function strikeMarcher(m, foe){
+  if (m.cd > 0) return;
+  m.cd = 1 / Math.max(0.3, m.rate);
+  let d = m.atk * atkMulOf(m.owner);
+  if (m.vs && m.vs.indexOf(foe.key) >= 0) d *= 1.6;
+  burst(foe.x, foe.y, 2, colorOf(m.owner));
+  damageMarcher(foe, d, m.owner);
+}
+/* 行军兵打对面棋盘上的守军 */
+function strikeDefender(m, tgt){
+  if (m.cd > 0) return;
+  m.cd = 1 / Math.max(0.3, m.rate);
+  // 伤害 = 攻方攻击 × 攻方加成 ÷ 守方减伤（下限 MY_DEF_FLOOR），两边同一条公式
+  let d = m.atk * atkMulOf(m.owner) / Math.max(MY_DEF_FLOOR, defMulOf(foeOf(m.owner)));
+  if (m.vs && tgt.u.type && m.vs.indexOf(tgt.u.type) >= 0) d *= 1.6;   // 克制对守军同样生效
+  tgt.u.hp -= d; tgt.u.flash = 0.25; tgt.u.hurt = 1; tgt.u.idleT = 0;   // 挨打了就重置脱战计时（两边同规则）
+  burst(tgt.x, tgt.y, 3, colorOf(m.owner));
+  if (Math.random() < 0.24) sfx('hit');
+  if (tgt.u.hp <= 0) killDefender(m.owner === 'ai', tgt.idx);
+}
+/* 迎面撞上的判定距离：两格心距 72，取 46 表示「贴上了」就算顶住 */
+const DUEL_R = 46;
+
+/* 行军兵的统一主循环：两边的兵走同一套逻辑，只有方向与结算系数不同。
+   推进优先级：迎面有敌兵 > 贴脸守军 > 射程内守军（边打边走）> 全速推进 */
+function updateMarchers(dt){
+  for (let i = G.marchers.length-1; i >= 0; i--){
+    const m = G.marchers[i];
+    m.born += dt;
+    m.hurt = Math.max(0, m.hurt - dt*3);
+    m.flash = Math.max(0, (m.flash || 0) - dt);
+    if (m.hp <= 0){ G.marchers.splice(i,1); continue; }
+    if (m.stun > 0){ m.stun -= dt; continue; }
+    let sp = m.spd;
+    if (m.slowT > 0){ m.slowT -= dt; sp *= 0.4; }
+    m.cd -= dt;
+    if (m.cd < -0.4) m.cd = -0.4;
+
+    // 1) 对面也有兵在同一条路上 -> 迎面顶住，必须打死对方才能继续前进
+    const duel = nearestFoeMarcher(m, DUEL_R);
+    if (duel){ strikeMarcher(m, duel); continue; }
+
+    // 2) 路上有守军顶着脸 -> 原地厮杀（拦停靠的是「路上的兵」，路外的兵不挡路）
+    const defMine = m.owner === 'ai';        // 我要打的是对面那块棋盘上的守军
+    const held = nearestDefender(defMine, m.x, m.y, BLOCK_R, true);
+    if (held){ strikeDefender(m, held); continue; }
+
+    // 3) 射程内路上的守军 -> 边打边挪，打得起来就走得慢
+    const far = nearestDefender(defMine, m.x, m.y, m.range, true);
+    if (far) strikeDefender(m, far);
+
+    // 4) 待命兵：按格子排队。排头站出兵格的下一格，第二人站再后一格 …… 一格一个人；
+    //    出兵格永远留空。走到自己的格子就停，绝不越过中缝。
+    //    我方路上每前进一格速度翻倍（ownPathSpeedMul），所以越排越快地归位。
+    if (m.queued){
+      const slot = m.headRi - 1 - queueRank(m);     // 该站的那一格（route 下标；-1 = 顶到出兵格前）
+      if (slot >= 0 && m.ri <= slot){
+        const rem = routeRemainTo(m, slot);
+        if (rem > 0.5) marchForward(m, Math.min(sp * ownPathSpeedMul(m) * dt, rem));
+        else { const p = m.route[slot]; m.x = p.x; m.y = p.y; m.ri = slot + 1; }
+      }
+      continue;
+    }
+
+    const adv = far ? sp * ATK_MOVE_MUL : sp;
+
+    if (marchForward(m, adv * dt)){
+      G.marchers.splice(i,1);
+      hitAdu(m.owner === 'ai' ? 'my' : 'en');
+    }
+  }
+}
+/* 守军阵亡：两块棋盘同一个出口。mine 只决定「清哪块盘、刷哪边的羁绊」。 */
+function killDefender(mine, idx){
+  const S = sideInfo(mine);
+  const u = S.board[idx];
+  if (!u) return;
+  const p = unitPos(u, S.baseY);
+  clearCells(S.board, idx);
+  burst(p.x, p.y, 16, S.color);
+  if (mine){ G.lostUnits = (G.lostUnits || 0) + 1; refreshBonds(); }
+  else refreshAiBonds();
+}
+function killMyUnit(idx){ killDefender(true, idx); }
+
+function hitAdu(side){
+  if (side === 'my'){
+    if (G.aduShield > 0) return;                 // 神兵符只保我方阿斗
+    G.myLife--; G.leaks++; sfx('lost');
+    burst(ADU_M.x, ADU_M.y, 30, SEAL);
+    G.mantou += 3;                               // 阿斗每掉 1 命补 3 馒头（双方同规则）
+    floater(ADU_M.x, ADU_M.y - 58, '阿斗受伤 +3 馒头', GOLD);
+    if (G.myLife <= 0) endGame(false);
+  } else {
+    if (G.aiShield > 0) return;                 // 电脑的神兵符
+    G.enLife--; G.aiLeaks++; sfx('hero');
+    burst(ADU_E.x, ADU_E.y, 30, GOLD);
+    aiGain(3, ADU_E.x, ADU_E.y + 46);            // 电脑的阿斗挨打同样补 3 馒头
+    if (G.enLife <= 0) endGame(true);
+  }
+}
+
+/* ============================================================
+   战斗：守军与守军索敌
+   上下半场是同一套规则，唯一的输入是「这一侧是谁」。
+   所有以前散在 updateMyUnits / updateAiUnits 两处的分叉都收进 sideInfo()，
+   以后改一处就是改两边，不会再长出不对称。
+   ============================================================ */
+function sideInfo(mine){
+  return mine ? {
+    mine:true, who:'me', foe:'ai',
+    board:G.board, hand:G.hand, passive:G.passive, actives:G.actives,
+    atkMul:globalAtk(), defMul:bondDef(), regen:bondRegen(),
+    baseY:Y_MINE, adu:ADU_M, foeAdu:ADU_E, color:GOLD, foeColor:SEAL,
+  } : {
+    mine:false, who:'ai', foe:'me',
+    board:G.enBoard, hand:G.ai.hand, passive:G.ai.passive, actives:G.ai.actives,
+    atkMul:aiAtkMul(), defMul:aiBondDef(), regen:aiBondRegen(),
+    baseY:Y_ENEMY, adu:ADU_E, foeAdu:ADU_M, color:SEAL, foeColor:GOLD,
+  };
+}
+/* 归属 -> 标量。热循环里不想每帧 new 个 sideInfo 对象时用这三个。 */
+function atkMulOf(who){ return who === 'me' ? globalAtk() : aiAtkMul(); }
+function defMulOf(who){ return who === 'me' ? bondDef()  : aiBondDef(); }
+function foeOf(who){ return who === 'me' ? 'ai' : 'me'; }
+function colorOf(who){ return who === 'me' ? GOLD : SEAL; }
+/* 守军索敌：只看对面阵营的行军兵，且只打自己这半场 */
+function unitTarget(u, mine){
+  const S = sideInfo(mine);
+  const p = unitPos(u, S.baseY);
+  let best = null, bd = 1e9;
+  for (const e of G.marchers){
+    if (e.hp <= 0 || e.owner !== S.foe) continue;
+    if (mine ? (e.y < MID1) : (e.y > MID1)) continue;
+    const d = Math.hypot(e.x - p.x, e.y - p.y);
+    if (d <= u.range && d < bd){ bd = d; best = e; }
+  }
+  return best;
+}
+/* 守军打行军兵的伤害：攻击方加成 × 克制 ×1.6 */
+function unitDmg(u, e, mine){
+  let d = u.atk * sideInfo(mine).atkMul;
+  if (u.vs && u.vs.indexOf(e.key) >= 0) d *= 1.6;
+  return d;
+}
+
+/* 一侧守军的主循环（回血 / 脱战回血 / 大招 / 出手）—— 两边共用这一个函数 */
+function updateSideUnits(dt, mine){
+  const S = sideInfo(mine);
+  ensureBuffs(mine);                       // 新落地的守军在这里兜底补上加成（两侧同一条）
+  const reg = S.regen;
+  for (let i = 0; i < S.board.length; i++){
+    const u = S.board[i];
+    if (!u || u.kind === 'char') continue;
+    if (!isAnchor(u, i)) continue;          // 名将横占两格，只结算一次
+    u.born += dt; u.flash = Math.max(0, u.flash - dt); u.swing = Math.max(0, u.swing - dt);
+    if (reg > 0 && u.hp < u.maxHp) u.hp = Math.min(u.maxHp, u.hp + u.maxHp*reg*dt);
+
+    // 脱战回血：连着 MY_REGEN_IDLE 秒没挨打，就回 MY_REGEN_PCT 血
+    u.idleT = (u.idleT || 0) + dt;
+    if (u.idleT >= MY_REGEN_IDLE){
+      u.idleT -= MY_REGEN_IDLE;
+      if (u.hp < u.maxHp){
+        u.hp = Math.min(u.maxHp, u.hp + u.maxHp * MY_REGEN_PCT);
+        u.regenT = 0.55;                  // 绿框回血提示
+      }
+    }
+    u.regenT = Math.max(0, (u.regenT || 0) - dt);
+
+    // 名将大招
+    if (u.kind === 'hero' && u.skill){
+      u.skCd = (u.skCd === undefined ? HEROES[u.type].cd : u.skCd) - dt;
+      if (u.skCd <= 0){ castHeroSkill(u, mine); u.skCd = HEROES[u.type].cd; }
+    }
+
+    if (u.atk <= 0 || !G.marchers.length) continue;
+    u.cd -= dt;
+    if (u.cd < -0.4) u.cd = -0.4;
+    if (u.cd > 0) continue;
+    const tgt = unitTarget(u, mine);
+    if (!tgt) continue;
+    dealFrom(u, tgt, unitDmg(u, tgt, mine), mine);
+    u.cd = 1 / Math.max(0.3, u.rate);
+    u.swing = 0.26;
+    if (Math.random() < 0.28) sfx('hit');
+  }
+}
+function updateMyUnits(dt){ updateSideUnits(dt, true); }
+function updateAiUnits(dt){ updateSideUnits(dt, false); }
+
+/* ---------------- 名将大招 ----------------
+   一份代码，两种归属：mine 只决定「打谁、给谁加血、飘字前缀」，
+   倍率 / 范围 / 冷却 / 判定两边完全一致。
+   （以前 castSkill 与 castAiSkill 两份抄来抄去，半径 520 对 420、
+     fallback 落点一个在我方半场中心一个在脚下，就是从这儿开始歪的。） */
+function castHeroSkill(u, mine){
+  const S = sideInfo(mine);
+  const h = HEROES[u.type];
+  const sk = u.skill || (h && h.skill);
+  const p0 = unitPos(u, S.baseY);
+  const cx = p0.x, cy = p0.y;
+  const A = u.atk * S.atkMul;
+  const foes = marchersOf(S.foe);              // 大招永远砸对面阵营的行军兵
+  const tag = mine ? '' : '电脑';
+  // 对面半场的中心：范围技的圆心、以及「一个目标都没找到」时的落点都用它
+  const foeMidX = BX + COLS*CELL/2;
+  const foeMidY = mine ? (Y_ENEMY + ROWS*CELL/2) : (Y_MINE + ROWS*CELL/2);
+  const beamEnd = mine ? 20 : H - 20;          // 光束打到对面那侧的尽头
+  switch (sk){
+    case 'longdan': {
+      G.fx.push({ type:'beam', x1:cx, y1:cy, x2:cx, y2:beamEnd, t:0, dur:0.55 });
+      for (const e of [...foes]) dealFrom(u, e, A*2.4, mine);
+      burst(cx, cy, 26, S.color); toast(tag + '赵云 · 龙胆！'); sfx('hero'); break;
+    }
+    case 'wusheng': {
+      let best = null, bn = -1;
+      for (const e of foes){
+        let n = 0;
+        for (const o of foes) if (Math.abs(o.x-e.x)<170 && Math.abs(o.y-e.y)<170) n++;
+        if (n > bn){ bn = n; best = e; }
+      }
+      const tx = best ? best.x : foeMidX, ty = best ? best.y : foeMidY;
+      G.fx.push({ type:'ring', x:tx, y:ty, r0:20, r1:200, t:0, dur:0.5, color:SEAL });
+      for (const e of [...foes]) if (Math.abs(e.x-tx)<200 && Math.abs(e.y-ty)<200) dealFrom(u, e, A*2.6, mine);
+      burst(tx, ty, 26, SEAL); toast(tag + '关羽 · 武圣！'); sfx('hero'); break;
+    }
+    case 'dangyang': {
+      G.fx.push({ type:'ring', x:foeMidX, y:foeMidY, r0:20, r1:470, t:0, dur:0.6, color:INK });
+      for (const e of foes) e.stun = Math.max(e.stun || 0, 3.0);
+      toast(tag + '张飞 · 当阳桥断喝！'); sfx('hero'); break;
+    }
+    case 'rende': {
+      for (const o of S.board) if (o && o.kind !== 'char') o.hp = Math.min(o.maxHp, o.hp + o.maxHp*0.35);
+      for (const e of [...foes]) dealFrom(u, e, A*0.8, mine);
+      G.fx.push({ type:'ring', x:cx, y:cy, r0:20, r1:300, t:0, dur:0.7, color:'#2f7d4f' });
+      toast(tag + '刘备 · 仁德！'); sfx('hero'); break;
+    }
+    case 'liegong': {
+      G.fx.push({ type:'rain', t:0, dur:3.0, tick:0, dmg: A*0.62, mine, src:u });
+      toast(tag + '黄忠 · 烈弓箭雨！'); sfx('hero'); break;
+    }
+    case 'tieqi': {
+      G.fx.push({ type:'ring', x:foeMidX, y:foeMidY, r0:20, r1:470, t:0, dur:0.6, color:'#2a5fa8' });
+      for (const e of [...foes]){ e.slowT = 4.0; dealFrom(u, e, A*0.9, mine); }
+      toast(tag + '马超 · 铁骑踏阵！'); sfx('hero'); break;
+    }
+  }
+}
+const castSkill = castHeroSkill;          // 旧名字保留，别处还在用
+
+/* ============================================================
+   我方冲阵兵（对攻）
+   ============================================================ */
+/* 追加 n 个兵到某一侧的进攻队列：'down' 是曹军打我，'up' 是我打电脑 */
+function sendAttack(side, n){
+  if (side === 'down'){
+    G.spawnLeft += n;
+    if (G.spawnGap <= 0) G.spawnGap = 0.30;
+  } else {
+    G.aiSpawnLeft += n;
+    if (G.aiSpawnGap <= 0) G.aiSpawnGap = 0.30;
+  }
+}
+
+/* ============================================================
+   上半场的对手：电脑（同一个游戏的另一个玩家）
+   规则与玩家几乎一致：馒头只来自杀敌、一次刷新 5 格手牌（旧牌上路）、
+   同种升阶（等级可差 1 阶）、两个单字拼名字召将、战功满则派兵来打我方阿斗。
+   异字合成（弩/骁/钺/铁/戟/骧）整体关闭（FUSE_ON=false），两边都不会再冒出这六种兵；
+   玩家看到对面冒出没见过的兵种会当成作弊，可读性比对称性值钱。
+   ============================================================ */
+function aiGain(v, x, y){
+  G.ai.mantou += v;
+  if (x !== undefined) floater(x, y - 20, '电脑 +' + (Math.round(v*10)/10), SEAL);
+}
+/* 电脑击杀所得：与玩家的 mantouMul 同一个公式 */
+function aiKillReward(e){ return e.mantou * aiMantouMul(); }
+/* 电脑抽牌：与玩家同一张掉落表 */
+function aiRollTile(){
+  if (Math.random() < SHOVEL_RATE) return { kind:'shovel' };
+  if (Math.random() < 0.28){
+    const ch = pickHeroCharAI();
+    if (ch) return { kind:'char', char: ch };
+  }
+  return { kind:'unit', type: pick(BASE_KEYS), level: 1 };
+}
+/* 给一个单字，返回能跟它凑成姓名的那半个字 */
+function partnerOf(c){
+  const out = [];
+  for (const n of GOLD_HEROES){
+    const h = HEROES[n];
+    if (h.a === c) out.push(h.b);
+    if (h.b === c) out.push(h.a);
+  }
+  return out.length ? pick(out) : null;
+}
+function pickHeroCharAI(){
+  if (!G.charPool || !G.charPool.length) refillPool();   // 电脑摸空也重洗（池子共用，不打扰玩家提示）
+  const held = [];
+  for (const t of G.ai.hand) if (t && t.kind === 'char') held.push(t.char);
+  for (const u of G.enBoard) if (u && u.kind === 'char') held.push(u.char);
+  if (held.length && Math.random() < 0.66){
+    const cand = [];
+    for (const c of held){
+      const p = partnerOf(c);
+      if (p && G.charPool.indexOf(p) >= 0) cand.push(p);
+    }
+    if (cand.length){
+      const c = pick(cand);
+      if (takePoolChar(c)) return c;
+    }
+  }
+  return drawPoolChar(Math.random() < (G.ai.passive.zhaoxian ? 0.88 : 0.74));
+}
+/* 电脑征兵：直接调用与玩家同一个 enlistSide()，只有飘字/音效是各自的 */
+function aiEnlist(){
+  const r = enlistSide(false);
+  if (!r.ok) return;
+  G.fx.push({ type:'ring', x: W/2, y: MID1 - 10, r0:16, r1:130, t:0, dur:0.4, color:SEAL });
+}
+/* 落子：优先把手牌叠到场上同种的守军上（合成升阶，等级可差 1 阶），其次铺到空位 */
+/* 电脑也逛自己的商店：同一张道具表、同一套价格与上限（主动最多 2 件） */
+function aiShop(){
+  const pool = SHOP_POOL.slice(), stock = [];
+  for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((Math.random()*pool.length)|0,1)[0]);
+  for (const id of stock){
+    const it = ITEMS[id];
+    if (G.ai.mantou < it.cost) continue;
+    if (it.type === 'active' && G.ai.actives.length >= 2) continue;
+    G.ai.mantou -= it.cost;
+    if (it.type === 'active') G.ai.actives.push(id);
+    else {
+      G.ai.passive[id] = true;
+      if (id === 'liangcao'){ G.enMax++; G.enLife++; }
+    }
+  }
+}
+/* 电脑用主动道具：神兵符保命、大补丸回命、毛笔补单字 */
+function aiUseActives(){
+  for (let i = 0; i < G.ai.actives.length; i++){
+    const id = G.ai.actives[i];
+    if (id === 'shenbing'){
+      if (G.enLife <= 1 && G.aiShield <= 0){
+        G.aiShield = 6; G.ai.actives.splice(i,1);
+        G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:20, r1:150, t:0, dur:0.5, color:GOLD });
+        toast('电脑使用 · 神兵符！');
+        return;
+      }
+    } else if (id === 'dabowu'){
+      if (G.enLife < G.enMax){
+        G.enLife++; G.ai.actives.splice(i,1);
+        G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:10, r1:90, t:0, dur:0.45, color:'#b08ed0' });
+        toast('电脑使用 · 大补丸！');
+        return;
+      }
+    } else if (id === 'maobi'){
+      for (let k = 0; k < G.ai.hand.length; k++){
+        const t = G.ai.hand[k];
+        if (!t || t.kind !== 'char') continue;
+        const nc = partnerOf(t.char);
+        if (nc){ G.ai.hand[k] = { kind:'char', char:nc }; G.ai.actives.splice(i,1); return; }
+      }
+    }
+  }
+}
+/* 这张手牌现在能不能落下去（能合成就合成，能占空格就占格） */
+function aiTilePlaceable(t, allowEmpty){
+  if (!t || t.kind === 'shovel') return false;
+  for (let i = 0; i < G.enBoard.length; i++){
+    const u = G.enBoard[i];
+    if (!u) continue;
+    if (!isAnchor(u, i)) continue;
+    if (u.kind === 'char' && t.kind !== 'char') continue;
+    const comb = tryCombine(t, u);
+    if (!comb) continue;
+    if (!aiCombOK(comb)) continue;
+    if (comb.kind === 'hero'){
+      const allow = [i].concat(u.cells || []);
+      if (findHeroSpan(i, G.enBoard, false, allow)) return true;
+    } else return true;
+  }
+  if (!allowEmpty) return false;
+  // 单字：能挨着另一半放、或者盘上孤字没到上限且熟地还宽裕，才值得去占一个空坑。
+  // 否则就当它落不下（留在手里，下次征兵会被回收），免得把熟地铺满死字。
+  if (t.kind === 'char' && !aiCharWorth(t.char)) return false;
+  for (let i = 0; i < G.enBoard.length; i++){
+    if (G.enBoard[i] || isPathCell(i, false) || isAduCell(i, false) || !aiLandOK(i)) continue;
+    if (t.kind === 'hero' && !findHeroSpan(i, G.enBoard, false, [])) continue;
+    return true;
+  }
+  // 熟地占满时，普通兵还能顶掉盘上的「孤字」
+  if (t.kind === 'unit' && aiJunkCharCell() >= 0) return true;
+  return false;
+}
+/* 电脑盘上还空着的熟地格数 */
+function aiEmptyLand(){
+  let n = 0;
+  for (let i = 0; i < G.enBoard.length; i++)
+    if (!G.enBoard[i] && !isPathCell(i, false) && !isAduCell(i, false) && aiLandOK(i)) n++;
+  return n;
+}
+/* 电脑盘上还有几个单字 */
+function aiCharCount(){
+  let n = 0;
+  for (const u of G.enBoard) if (u && u.kind === 'char') n++;
+  return n;
+}
+/* 电脑已经派出去几个出击兵（防止它把整手牌都倒到路上） */
+function aiRaiderCount(){
+  let n = 0;
+  for (const m of G.marchers) if (m.owner === 'ai' && m.raider) n++;
+  return n;
+}
+/* 这块单字牌值不值得落到盘上：
+   能紧挨着另一半放（落下去立刻成将）→ 值得；
+   否则只有在「盘上的孤字还没到上限」且「熟地还宽裕」时才铺，
+   免得一路铺满死字、把熟地占干。 */
+function aiCharWorth(ch){
+  if (aiCharSpot(ch) >= 0) return true;
+  return aiCharCount() < AI_MAX_CHARS && aiEmptyLand() >= AI_HOLD_FREE;
+}
+/* 落子：优先把手牌叠到场上同种的守军上（合成升阶，等级可差 1 阶），其次铺到空位 */
+function aiPlace(){
+  // 电脑也要把熟地铺满、再靠铲子往外扩。两边地界完全对等
+  // （开局各 10 格熟地，之后各靠自己的铲子挖），所以上限对着同一个数来。
+  const target = clamp(18 + Math.floor(G.wave*1.6), 18, 37);
+  let cnt = boardCount(G.enBoard);
+  let placed = 0;
+
+  for (let hi = G.ai.hand.length - 1; hi >= 0; hi--){
+    const t = G.ai.hand[hi];
+    if (!t){ G.ai.hand.splice(hi, 1); continue; }
+    // 铲子：电脑也开垦荒地（和玩家 dropOnCell 里的铲子逻辑对称）
+    if (t.kind === 'shovel'){
+      let best = -1, bs = -1e9;
+      for (let i = 0; i < G.enBoard.length; i++){
+        if (isRoad(i, false) || aiLandOK(i) || G.enBoard[i]) continue;
+        const sc = cellScore(i, false);
+        if (sc > bs){ bs = sc; best = i; }
+      }
+      if (best >= 0){ G.aiUnlocked[best] = true; G.ai.hand.splice(hi, 1); }
+      continue;
+    }
+    // 1) 叠到同种的守军身上 -> 升阶（等级可差 1 阶）
+    let merged = false;
+    for (let i = 0; i < G.enBoard.length && !merged; i++){
+      const u = G.enBoard[i];
+      if (!u || !isAnchor(u, i)) continue;
+      if (u.kind === 'char' && t.kind !== 'char') continue;
+      const comb = tryCombine(t, u);
+      if (!comb) continue;
+      if (!aiCombOK(comb)) continue;
+      if (comb.kind === 'hero'){
+        // 名将横占两格
+        const allow = [i].concat(u.cells || []);
+        const span = findHeroSpan(i, G.enBoard, false, allow);
+        if (!span) continue;
+        if (u.cells) for (const k of u.cells) if (span.indexOf(k) < 0) G.enBoard[k] = null;
+        const nu = newUnit(comb.type, comb.level, span[0], span);
+        nu.born = 0;
+        for (const k of span) G.enBoard[k] = nu;
+        const cx = (cellCX(colOf(span[0])) + cellCX(colOf(span[1]))) / 2;
+        burst(cx, cellCY(colOf(span[0]), rowOf(span[0]), Y_ENEMY), 24, GOLD);
+        toast('电脑召出 · ' + comb.type + '！');
+      } else {
+        const nu = toUnitObject(comb, i);
+        nu.born = 0;
+        G.enBoard[i] = nu;
+        burst(cellCX(colOf(i)), cellCY(colOf(i), rowOf(i), Y_ENEMY), 12, SEAL);
+      }
+      G.ai.hand.splice(hi, 1);
+      merged = true; placed++;
+    }
+    if (merged) continue;
+    // 2) 铺到空位（场上人还不满时）
+    let done = false;
+    if (cnt < target){
+      const empt = [];
+      for (let i = 0; i < G.enBoard.length; i++)
+        if (!G.enBoard[i] && !isPathCell(i, false) && !isAduCell(i, false) && aiLandOK(i)) empt.push(i);
+      // 单字优先贴着它的「另一半」落 —— 一放下 autoFormHeroes 就会把两字拼成名将。
+      // 没伙伴可配、熟地又吃紧的时候就别拿单字去占坑（留在手里，下次征兵一起回收）。
+      // 原来不做区分，单字一路铺满前排却永远拼不起来，中后期电脑半张盘都是死字。
+      let idx = -1;
+      if (t.kind === 'char') idx = aiCharSpot(t.char);
+      if (idx < 0 && t.kind === 'char' && !aiCharWorth(t.char)) continue;
+      if (idx < 0 && empt.length) idx = aiPickCell(empt);
+      if (idx >= 0){
+        if (t.kind === 'hero'){
+          const span = findHeroSpan(idx, G.enBoard, false, []);
+          if (span){
+            const nu = newUnit(t.type, t.level, span[0], span);
+            nu.born = 0;
+            for (const k of span) G.enBoard[k] = nu;
+            G.ai.hand.splice(hi, 1); cnt++; placed++; done = true;
+          }
+        } else {
+          const nu = toUnitObject(t, idx);
+          if (nu){ nu.born = 0; G.enBoard[idx] = nu; G.ai.hand.splice(hi, 1); cnt++; placed++; done = true; }
+        }
+      }
+    }
+    // 2b) 盘上已经铺够了：多余的兵放上路 -> 变成出击兵，从它的半场朝我这边打过来。
+    //     和玩家同一套规则（spawnRaider），只是起点用电脑自己半场的路头。
+    if (!done && t.kind === 'unit' && aiRaiderCount() < 3 && Math.random() < 0.85){
+      // 放不进棋盘的兵不干等：派上路，从路头往下走两格再过缝，别显得像瞬移
+      const cell = PATH_CELLS_E[Math.min(2, PATH_CELLS_E.length - 1)];
+      if (cell !== undefined && spawnRaider('ai', cell, t.type, t.level)){
+        G.ai.hand.splice(hi, 1); placed++; done = true;
+      }
+    }
+    // 2c) 熟地占满了：普通兵可以顶掉盘上一个「孤字」（另一半不在场，纯占坑的死字）。
+    //     没有这条，单字一旦铺开就永远清不掉，电脑的战斗力会一路烂下去。
+    if (!done && t.kind === 'unit'){
+      const j = aiJunkCharCell();
+      if (j >= 0){
+        clearCells(G.enBoard, j);
+        const nu = toUnitObject(t, j);
+        if (nu){ nu.born = 0; G.enBoard[j] = nu; G.ai.hand.splice(hi, 1); placed++; done = true; }
+      }
+    }
+  }
+  if (placed) autoFormHeroes(G.enBoard, false);   // 电脑也享受「相邻两字自动成将」
+  return placed;
+}
+/* 布阵打分：贴着路边（pathAway=1）的格子最能拦停敌军，隔一格的次之，越荒越差。
+   frontAway = 离自己的出兵点近不近（1 = 紧挨出兵点），越靠前越早接敌。 */
+function cellScore(i, mine){
+  const c = colOf(i), r = rowOf(i);
+  const d = pathAway(i, mine);
+  let s = 0;
+  if (d <= 1) s += 6;
+  else if (d === 2) s += 1.5;
+  else s -= (d - 2) * 1.2;
+  // 贴着阿斗的格子是最后一道防线
+  const aduC = mine ? ADU_M_C : ADU_E_C;
+  const da = Math.max(Math.abs(c - aduC[0]), Math.abs(r - aduC[1]));
+  if (da === 1) s += 3;
+  // 往前压：玩家的出兵点在 r=0 一侧，电脑的在 r=ROWS-1 一侧
+  const front = mine ? r : (ROWS - 1 - r);
+  s -= front * 0.22;
+  return s;
+}
+/* 选格子：优先能拦停敌军的路边格，其次贴着阿斗的格子，其余往前压 */
+function aiPickCell(empt){
+  let best = empt[0], bs = -1e9;
+  for (const i of empt){
+    const s = cellScore(i, false);
+    if (s > bs){ bs = s; best = i; }
+  }
+  return best;
+}
+/* 单字 -> 能和它拼成名将的另一半字。
+   关/张/黄 这类一字多义的会返回多个（关 → 羽/兴/平），所以不能像 partnerOf 那样随机挑一个。 */
+function partnersOf(ch){
+  const out = [];
+  for (const n of (CHAR_HERO[ch] || [])){
+    const h = HEROES[n];
+    const p = (h.a === ch) ? h.b : h.a;
+    if (out.indexOf(p) < 0) out.push(p);
+  }
+  return out;
+}
+/* 这块单字牌放在哪最值：紧挨着场上另一半字的空位（放下去 autoFormHeroes 立刻拼成名将）。
+   找不到返回 -1。 */
+function aiCharSpot(ch){
+  const ps = partnersOf(ch);
+  if (!ps.length) return -1;
+  for (let i = 0; i < G.enBoard.length; i++){
+    const u = G.enBoard[i];
+    if (!u || u.kind !== 'char' || ps.indexOf(u.char) < 0) continue;
+    const c = colOf(i), r = rowOf(i);
+    for (const nc of [c - 1, c + 1]){
+      if (nc < 0 || nc >= COLS) continue;
+      const j = nc + r * COLS;
+      if (G.enBoard[j] || !aiLandOK(j) || isPathCell(j, false) || isAduCell(j, false)) continue;
+      return j;
+    }
+  }
+  return -1;
+}
+/* 盘上的「孤字」：单字，且场上没有能跟它拼上的另一半 —— 纯占坑，普通兵可以把它顶掉 */
+function aiJunkCharCell(){
+  for (let i = 0; i < G.enBoard.length; i++){
+    const u = G.enBoard[i];
+    if (!u || u.kind !== 'char') continue;
+    const ps = partnersOf(u.char);
+    let has = false;
+    for (let k = 0; k < G.enBoard.length && !has; k++){
+      if (k === i) continue;
+      const v = G.enBoard[k];
+      if (v && v.kind === 'char' && ps.indexOf(v.char) >= 0) has = true;
+    }
+    if (!has) return i;
+  }
+  return -1;
+}
+function aiTick(dt){
+  G.ai.t += dt;
+  if (G.ai.t < AI_TICK) return;
+  G.ai.t = 0;
+  aiUseActives();
+  aiPlace();
+  // 手牌全落不下去了才刷新征兵，免得把攒着的单字碎片回收掉
+  let canPlace = false;
+  for (const t of G.ai.hand){ if (aiTilePlaceable(t, true)){ canPlace = true; break; } }
+  if (!canPlace){ aiEnlist(); aiPlace(); }
+  refreshAiBonds();
+}
+/* ============================================================
+   神秘商人 / 道具
+   ============================================================ */
+function openShop(){
+  aiShop();                 // 电脑同时逛自己的商店（各买各的）
+  const pool = SHOP_POOL.slice();
+  const stock = [];
+  for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((Math.random()*pool.length)|0,1)[0]);
+  G.shopStock = stock;
+  G.phase = 'shop';
+  sfx('buy');
+}
+function buyItem(id){
+  const it = ITEMS[id];
+  if (G.mantou < it.cost){ toast('馒头不足'); sfx('hit'); return; }
+  if (it.type === 'active' && G.actives.length >= 2){
+    toast('主动道具只能带 2 件 · 先用掉一件');
+    sfx('hit'); return;
+  }
+  G.mantou -= it.cost;
+  if (it.type === 'active') G.actives.push(id);
+  else {
+    G.passive[id] = true;
+    if (id === 'liangcao'){ G.myMax++; G.myLife++; }
+  }
+  sfx('buy');
+  toast('购得「' + it.name + '」');
+  G.shopStock = G.shopStock.filter(x => x !== id);
+  if (!G.shopStock.length) G.phase = 'battle';
+}
+function closeShop(){ G.phase = 'battle'; }
+function useActive(slot){
+  const id = G.actives[slot];
+  if (!id) return;
+  const it = ITEMS[id];
+  if (id === 'shenbing'){ G.aduShield = 6; toast('神兵符 · 全军无敌 6 秒'); }
+  else if (id === 'dabowu'){
+    if (G.myLife >= G.myMax){ toast('阿斗已满命'); return; }
+    G.myLife++; toast('大补丸 · 阿斗回 1 命');
+  }
+  else if (id === 'maobi'){
+    const filled = [];
+    for (let i = 0; i < G.hand.length; i++) if (G.hand[i]) filled.push(i);
+    if (!filled.length){ toast('手牌空了'); return; }
+    const i = pick(filled);
+    const old = tileChar(G.hand[i]);
+    const nc = pickHeroChar();
+    if (!nc){ toast('字池异常 · 请重开一局'); G.actives.splice(slot,1); return; }
+    G.hand[i] = { kind:'char', char:nc };
+    toast('毛笔 ·「' + old + '」→「' + nc + '」');
+  }
+  G.actives.splice(slot,1);
+  G.fx.push({ type:'ring', x:ADU_M.x, y:ADU_M.y, r0:10, r1:200, t:0, dur:0.5, color:GOLD });
+  sfx('hero');
+}
+
+/* ============================================================
+   特效更新
+   ============================================================ */
+function updateFx(dt){
+  for (let i = G.fx.length-1; i >= 0; i--){
+    const f = G.fx[i];
+    f.t += dt;
+    if (f.type === 'rain'){
+      f.tick -= dt;
+      if (f.tick <= 0){
+        f.tick = 0.22;
+        const foes = marchersOf(f.mine ? 'ai' : 'me');
+        for (const e of foes) dealFrom(f.src, e, f.dmg, !!f.mine);
+        const y0 = f.mine ? Y_ENEMY - 20 : Y_MINE - 20, y1 = y0 + ROWS*CELL;
+        for (let k=0;k<3;k++) burst(rnd(BX, BX + COLS*CELL), rnd(y0, y1), 3, INK2);
+      }
+    }
+    if (f.t >= f.dur) G.fx.splice(i,1);
+  }
+  for (let i = G.parts.length-1; i >= 0; i--){
+    const p = G.parts[i];
+    p.t += dt; p.x += p.vx*dt; p.y += p.vy*dt; p.vy += 340*dt;
+    if (p.t >= p.dur) G.parts.splice(i,1);
+  }
+  for (let i = G.floaters.length-1; i >= 0; i--){
+    const f = G.floaters[i];
+    f.t += dt; f.y -= 34*dt;
+    if (f.t >= f.dur) G.floaters.splice(i,1);
+  }
+}
+
+/* ============================================================
+   主更新
+   ============================================================ */
+/* 不设时间上限：一局只有一种结束方式 —— 哪一方的阿斗先被打光。
+   出兵节奏：每 WAVE_GAP 秒一批，不管上一批走没走完；
+   但如果某一方把这一波**提前清干净**了，立刻开下一波（两边一起开，不等另一边）。
+   一批的兵力 = 7 + 波次（第 1 批 8 个、第 2 批 9 个、第 3 批 10 个……）。 */
+const WAVE_GAP = 20;
+/* 速清提前开波的最短间隔：免得刚开波就「场上没人」→ 无限连刷 */
+const WAVE_EARLY_MIN = 3;
+
+function endGame(win){
+  if (G.phase === 'over') return;
+  G.phase = 'over';
+  G.result = win ? 'win' : 'lose';
+  sfx(win ? 'win' : 'lost');
+}
+
+function step(dt){
+  if (G.paused) return;                                            // 暂停：时间不推进
+  if (G.phase === 'intro' || G.phase === 'over' || G.phase === 'shop'){ updateFx(dt); return; }
+  if (G.phase === 'prep'){
+    G.prepT -= dt;
+    aiTick(dt);            // 备战时电脑也在同步经营，两边起点一样
+    if (G.prepT <= 0){ G.phase = 'battle'; startWave(); }
+    return;
+  }
+
+  G.time += dt;
+  if (G.aiShield > 0) G.aiShield -= dt;
+
+  // 下半场出兵：曹军从下半场的敌军出生点下来打我方阿斗
+  if (G.spawnLeft > 0){
+    G.spawnGap -= dt;
+    if (G.spawnGap <= 0){
+      G.spawnGap = spawnGapOf(G.wave);
+      G.spawnLeft--;
+      spawnWave('ai', G.spawnQueue.pop() || enemySpec(G.wave));
+    }
+  }
+  // 上半场出兵：汉军从上半场的敌军出生点上去打电脑的阿斗
+  if (G.aiSpawnLeft > 0){
+    G.aiSpawnGap -= dt;
+    if (G.aiSpawnGap <= 0){
+      G.aiSpawnGap = spawnGapOf(G.wave);
+      G.aiSpawnLeft--;
+      spawnWave('me', G.aiSpawnQueue.pop() || enemySpec(G.wave));
+    }
+  }
+  // 到点就开下一批，不看上批是否还在场上；
+  // 另外任一方把这一波的兵清干净了，也立刻开下一波 —— 两边同时开。
+  G.waveT += dt;
+  if (G.waveT >= WAVE_GAP) startWave(false);
+  else if (G.waveT >= WAVE_EARLY_MIN && (waveClearedFor(true) || waveClearedFor(false))) startWave(true);
+
+  updateMarchers(dt);        // 两边所有的行军兵，一套逻辑
+  updateMyUnits(dt);
+  updateAiUnits(dt);
+
+  // 战功满：双方各派一支突击队去打对面（同一套规则）
+  if (G.merit >= G.meritNeed){
+    G.merit -= G.meritNeed;
+    sendAttack('up', 3);
+    G.fx.push({ type:'ring', x: W/2, y: MID1 - 10, r0:40, r1:200, t:0, dur:0.5, color:GOLD });
+    toast('战功满 · 我军突击队出动！');
+    sfx('enlist');
+  }
+  if (G.ai.merit >= G.ai.meritNeed){
+    G.ai.merit -= G.ai.meritNeed;
+    sendAttack('down', 3);
+    G.fx.push({ type:'ring', x: W/2, y: MID2 + 10, r0:40, r1:200, t:0, dur:0.5, color:SEAL });
+    toast('电脑战功满 · 曹军突击队压境！');
+    sfx('lost');
+  }
+
+  aiTick(dt);                 // 电脑征兵/布阵（与玩家的节奏一致）
+
+  // 商人
+  G.shopT -= dt;
+  if (G.shopT <= 0 && G.wave >= 2){ G.shopT = 44; openShop(); }
+
+  updateFx(dt);
+}
+function startBattle(){
+  G.phase = 'prep'; G.prepT = 15;
+  toast('备战 15 秒 · 快布阵');
+}
+
+/* ---------------- 暂停 ---------------- */
+/* 只有人机对战才能暂停：将来真人对战把 G.vsAI 置 false，暂停按钮与快捷键一起失效 */
+function canPause(){ return !!G && G.vsAI && (G.phase === 'prep' || G.phase === 'battle'); }
+function setPaused(v){
+  if (v && !canPause()) return;
+  G.paused = !!v;
+  G.dragger = null;              // 松开手里拖着的牌，避免冻结时卡住
+  if (G.paused){ G._pauseBtns = null; sfx('click'); }
+}
+function togglePause(){ setPaused(!G.paused); }
+function pauseAction(id){
+  if (id === 'resume'){ sfx('click'); setPaused(false); return; }
+  if (id === 'mute'){ muted = !muted; if (!muted) sfx('click'); return; }
+  if (id === 'restart'){
+    G.paused = false;
+    newGame(); startBattle();
+    toast('重开一局 · 备战 15 秒');
+  }
+}
+
+/* ============================================================
+   渲染
+   ============================================================ */
+function drawBg(){
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0, '#ece3d2');
+  g.addColorStop(0.5, PAPER);
+  g.addColorStop(1, '#e7dcc8');
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // 水墨晕染
+  ctx.save();
+  ctx.globalAlpha = 0.05;
+  for (let i=0;i<6;i++){
+    const x = (i*173 % W), y = (i*271 % H);
+    const rg = ctx.createRadialGradient(x, y, 0, x, y, 180);
+    rg.addColorStop(0, '#6b5f4a'); rg.addColorStop(1, 'rgba(107,95,74,0)');
+    ctx.fillStyle = rg; ctx.fillRect(x-180, y-180, 360, 360);
+  }
+  ctx.restore();
+  // 中缝
+  ctx.fillStyle = 'rgba(150,135,110,0.10)';
+  ctx.fillRect(0, MID1, W, MID2-MID1);
+  ctx.strokeStyle = 'rgba(120,105,80,0.28)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,MID1+.5); ctx.lineTo(W,MID1+.5); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,MID2-.5); ctx.lineTo(W,MID2-.5); ctx.stroke();
+}
+
+/* 路上的行进方向小箭头 */
+function roadArrow(x, y, ang){
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(ang);
+  ctx.beginPath();
+  ctx.moveTo(8, 0); ctx.lineTo(-5, -7); ctx.lineTo(-2, 0); ctx.lineTo(-5, 7);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawGateMark(x, y, isEnemy){
+  const c = isEnemy ? '176,58,46' : '176,58,46';
+  const gw = CELL*0.30, gh = CELL*0.22;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(' + c + ',0.72)'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(x - gw, y + gh);      ctx.lineTo(x - gw, y - gh*0.55);
+  ctx.moveTo(x + gw, y + gh);      ctx.lineTo(x + gw, y - gh*0.55);
+  ctx.moveTo(x - gw - 6, y - gh*0.72); ctx.lineTo(x + gw + 6, y - gh*0.72);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(' + c + ',0.62)';
+  ctx.font = 'bold 12px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('出兵', x, y + gh*0.30);
+  ctx.restore();
+}
+
+/* 一块棋盘：先在底层铺出那条蛇形路，再逐格画可布防的地 */
+function drawBoardBase(baseY, board, isEnemy){
+  const mine = !isEnemy;
+  const cells = pathList(mine);
+  const pts = pathPoints(mine);
+  const adu = mine ? ADU_M : ADU_E;
+  const road = pts.concat([{ x: adu.x, y: adu.y }]);   // 路一直铺进阿斗那一格
+
+  // ---- 路 ----
+  ctx.save();
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(road[0].x, road[0].y);
+  for (let i = 1; i < road.length; i++) ctx.lineTo(road[i].x, road[i].y);
+  ctx.strokeStyle = 'rgba(176,58,46,0.075)'; ctx.lineWidth = CELL - 10; ctx.stroke();
+  ctx.strokeStyle = 'rgba(176,58,46,0.16)';  ctx.lineWidth = CELL - 22; ctx.stroke();
+  ctx.setLineDash([12, 10]); ctx.lineWidth = 2.5;
+  ctx.strokeStyle = 'rgba(176,58,46,0.30)';  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = 'rgba(176,58,46,0.26)';
+  for (let i = 0; i < road.length - 1; i++){
+    const a = road[i], b = road[i+1];
+    roadArrow((a.x + b.x)/2, (a.y + b.y)/2, Math.atan2(b.y - a.y, b.x - a.x));
+  }
+  ctx.restore();
+
+  // ---- 逐格 ----
+  for (let r = 0; r < ROWS; r++){
+    for (let c = 0; c < COLS; c++){
+      const idx = c + r*COLS;
+      const x = BX + c*CELL, y = baseY + r*CELL;
+      // 阿斗那一格
+      if (isAduCell(idx, mine)){
+        ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.10)' : 'rgba(184,134,11,0.14)';
+        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
+        ctx.strokeStyle = isEnemy ? 'rgba(176,58,46,0.44)' : 'rgba(184,134,11,0.52)';
+        ctx.lineWidth = 2; ctx.setLineDash([7,5]);
+        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.stroke();
+        ctx.setLineDash([]);
+        continue;
+      }
+      if (isPathCell(idx, mine)){
+        // 拖着普通兵时，把「可以上路」的格子标出来
+        const dg = G.dragger;
+        if (mine && dg && dg.moved && dg.tile && dg.tile.kind === 'unit'){
+          ctx.strokeStyle = 'rgba(184,134,11,0.55)';
+          ctx.setLineDash([5,6]); ctx.lineWidth = 1.6;
+          rr(ctx, x+5, y+5, CELL-10, CELL-10, 8); ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        continue;                                    // 路已经在底层铺好了
+      }
+      // 荒地：玩家要用铲子挖，电脑没有铲子就一律用不了
+      const locked = mine ? !G.unlocked[idx] : !aiLandOK(idx);
+      // 现在开局只有 5 格熟地，荒地占了大半张盘 —— 每格都画个小铲子会糊成一片，
+      // 所以只在「手里正拖着铲子」的时候才把可开垦的格子点亮，平时只留一层淡绿。
+      const dg2 = G.dragger;
+      const digging = mine && dg2 && dg2.moved && dg2.tile && dg2.tile.kind === 'shovel';
+      if (locked){
+        ctx.fillStyle = 'rgba(125,156,90,0.10)';
+        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
+        ctx.strokeStyle = digging ? 'rgba(184,134,11,0.60)' : 'rgba(125,156,90,0.30)';
+        ctx.setLineDash([6,6]); ctx.lineWidth = digging ? 2 : 1.2;
+        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.045)' : 'rgba(255,255,255,0.52)';
+        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
+        ctx.strokeStyle = isEnemy ? 'rgba(176,58,46,0.20)' : 'rgba(90,80,65,0.20)';
+        ctx.lineWidth = 1;
+        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.stroke();
+      }
+    }
+  }
+
+  // ---- 出兵点：路的起点画一座小城门 ----
+  const sp = spawnPos(mine);
+  drawGateMark(sp.x, sp.y, isEnemy);
+}
+
+function tierOf(t){
+  const lv = clamp(t.level || 1, 1, MAX_TIER);
+  return TIER[lv];
+}
+/* 等级角标：右上角一个实心方块，里面直接写数字 1–5。
+   以前写的是「卒/士/校/尉/将」，玩家得先背一张对照表才知道谁高谁低 ——
+   数字没有学习成本；「这是第几档」仍然由方块颜色（白绿蓝紫金）负责，远看也能分级。 */
+function drawLevelBadge(xRight, yTop, bs, lv, color){
+  const side = bs*1.42;
+  const x = xRight - side;
+  ctx.fillStyle = color; ctx.globalAlpha = 0.94;
+  rr(ctx, x, yTop, side, side, 4); ctx.fill();
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fffaf0';
+  ctx.font = 'bold ' + Math.round(bs*1.04) + 'px ' + FONT;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(String(lv), x + side/2, yTop + side/2 + 0.5);
+}
+// 统一的卡面绘制（手牌 / 棋盘单位 / 名将）
+function drawCard(x, y, s, t, o){
+  o = o || {};
+  const kind = t.kind;
+  let bg = PAPER_L, bd = '#c9c0b0', tc = INK, badge = '', lvBadge = 0;
+  if (kind === 'shovel'){ bg = '#e9efe1'; bd = '#a4bb8c'; tc = '#4c6b3a'; badge = '铲'; }
+  else if (kind === 'hero'){
+    const rank = HEROES[t.type].r;
+    bg = rank === 'gold' ? '#fdf3d6' : '#f4ecfb';
+    bd = rank === 'gold' ? '#d8b64f' : '#b08ed0';
+    tc = rank === 'gold' ? '#8a5a06' : '#5f2f88';
+    lvBadge = clamp(t.level||1,1,MAX_TIER);
+  }
+  else if (kind === 'char'){ bg = '#fdf7e8'; bd = '#d9bd68'; tc = '#8a5a06'; badge = '字'; }
+  else { const st = tierOf(t); bg = st.bg; bd = st.bd; tc = st.c; lvBadge = clamp(t.level||1,1,MAX_TIER); }
+
+  ctx.save();
+  if (o.alpha) ctx.globalAlpha = o.alpha;
+  // 阴影 + 卡面
+  ctx.fillStyle = 'rgba(70,60,45,0.16)';
+  rr(ctx, x+2, y+3, s, s, 10); ctx.fill();
+  ctx.fillStyle = bg;
+  rr(ctx, x, y, s, s, 10); ctx.fill();
+  // 边框随品阶加粗：高品阶的牌一眼更「重」
+  const lvl = clamp(t.level || 1, 1, MAX_TIER);
+  ctx.strokeStyle = bd;
+  ctx.lineWidth = (kind === 'hero') ? (2.2 + lvl*0.24) : (1.4 + lvl*0.36);
+  rr(ctx, x, y, s, s, 10); ctx.stroke();
+  ctx.lineWidth = 1;
+
+  if (kind === 'shovel'){
+    const mx = x + s/2, my = y + s/2;
+    ctx.strokeStyle = '#5d7a41'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(mx-3, my-21); ctx.lineTo(mx-3, my+18); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(mx-17, my+10); ctx.quadraticCurveTo(mx-3, my+28, mx+11, my+10); ctx.stroke();
+  } else if (kind === 'hero'){
+    // 竖排名将名
+    ctx.fillStyle = tc;
+    ctx.font = Math.round(s*0.31) + 'px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(t.type[0], x + s/2, y + s*0.30);
+    ctx.fillText(t.type[1] || '', x + s/2, y + s*0.70);
+    // 技能冷却环
+    if (o.cd !== undefined){
+      const h = HEROES[t.type];
+      const p = clamp(o.cd / h.cd, 0, 1);
+      ctx.strokeStyle = 'rgba(184,134,11,0.65)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(x + s/2, y + s/2, s*0.47, -Math.PI/2, -Math.PI/2 + Math.PI*2*(1-p));
+      ctx.stroke();
+    }
+  } else {
+    const ch = t.char || (UNITS[t.type] ? UNITS[t.type].char : (FUSE[t.type] ? FUSE[t.type].char : '?'));
+    ctx.fillStyle = tc;
+    ctx.font = Math.round(s*0.48) + 'px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(ch, x + s/2, y + s*0.42);
+  }
+  // 品阶角标 / 攻击力小签都按卡面尺寸等比缩放：
+  // 出场那 0.22 秒卡面只有 0.6 倍大，固定字号的角标会盖到字上
+  const bs = Math.max(8, Math.round(s*0.19));
+  if (lvBadge) drawLevelBadge(x + s - 2.5, y + 2.5, bs, lvBadge, tc);
+  if (badge){
+    // 铲 / 字 这两类不是等级，是「这张牌是什么」—— 仍然用字
+    const cw = bs*1.6, ch = bs*1.44;
+    ctx.globalAlpha = 0.94;
+    ctx.fillStyle = tc;
+    rr(ctx, x + s - cw - 2.5, y + 2.5, cw, ch, 4); ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#fffaf0';
+    ctx.font = 'bold ' + Math.round(bs*1.0) + 'px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(badge, x + s - cw/2 - 2.5, y + 2.5 + ch/2 + 0.5);
+  }
+  // 攻击力小签（兵种差异一眼可见；射程/攻速点开看详情）
+  // 压在左下角：上方留出大字的位置，下方留出血条的位置
+  if (o.stat){
+    const bw = s*0.46, bh = s*0.20, bf = Math.max(7, Math.round(s*0.15));
+    ctx.fillStyle = 'rgba(90,80,65,0.15)';
+    rr(ctx, x + s*0.06, y + s - bh - s*0.11, bw, bh, 4); ctx.fill();
+    ctx.fillStyle = INK2; ctx.font = bf + 'px ' + FONT;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText('攻' + o.stat, x + s*0.12, y + s - bh/2 - s*0.11);
+  }
+  ctx.restore();
+
+  // 血条
+  if (o.hp !== undefined && o.maxHp){
+    const p = clamp(o.hp/o.maxHp, 0, 1);
+    if (p < 0.999){
+      const w = s - 14, bx = x + 7, by = y + s - 7;
+      ctx.fillStyle = 'rgba(60,50,40,0.22)';
+      rr(ctx, bx, by, w, 5, 2.5); ctx.fill();
+      ctx.fillStyle = p > 0.5 ? '#4f8a4a' : (p > 0.25 ? '#c79a26' : SEAL);
+      rr(ctx, bx, by, w*p, 5, 2.5); ctx.fill();
+    }
+  }
+}
+
+/* 名将宽卡：横跨两个格子，左格第一个字、右格第二个字 */
+function drawHeroWide(x, y, w, h, t, o){
+  o = o || {};
+  const rank = HEROES[t.type].r;
+  const bg = rank === 'gold' ? '#fdf3d6' : '#f4ecfb';
+  const bd = rank === 'gold' ? '#d8b64f' : '#b08ed0';
+  const tc = rank === 'gold' ? '#8a5a06' : '#5f2f88';
+  ctx.save();
+  if (o.alpha) ctx.globalAlpha = o.alpha;
+  ctx.fillStyle = 'rgba(70,60,45,0.16)';
+  rr(ctx, x+2, y+3, w, h, 11); ctx.fill();
+  ctx.fillStyle = bg;
+  rr(ctx, x, y, w, h, 11); ctx.fill();
+  ctx.strokeStyle = bd; ctx.lineWidth = 2.5;
+  rr(ctx, x, y, w, h, 11); ctx.stroke();
+  // 两格之间的分隔（明确告诉玩家它占了两个格子）
+  ctx.strokeStyle = 'rgba(150,130,80,0.40)'; ctx.lineWidth = 1.5;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath(); ctx.moveTo(x + w/2, y + 7); ctx.lineTo(x + w/2, y + h - 7); ctx.stroke();
+  ctx.setLineDash([]);
+  // 两个字各占一格
+  ctx.fillStyle = tc;
+  ctx.font = Math.round(h*0.58) + 'px ' + FONT;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(t.type[0], x + w*0.25, y + h*0.48);
+  ctx.fillText(t.type[1] || '', x + w*0.75, y + h*0.48);
+  // 等级角标（右上角数字，与普通卡同一套）
+  drawLevelBadge(x + w - 4, y + 4, Math.max(9, Math.round(h*0.20)), clamp(t.level||1,1,MAX_TIER), tc);
+  // 技能冷却环
+  if (o.cd !== undefined){
+    const hd = HEROES[t.type];
+    const pr = clamp(o.cd / hd.cd, 0, 1);
+    ctx.strokeStyle = 'rgba(184,134,11,0.60)'; ctx.lineWidth = 2; ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(x + w*0.25, y + h*0.48, Math.min(w,h)*0.30, -Math.PI/2, -Math.PI/2 + Math.PI*2*(1-pr));
+    ctx.stroke();
+  }
+  ctx.restore();
+  // 血条（横跨两格）
+  if (o.hp !== undefined && o.maxHp){
+    const pr = clamp(o.hp/o.maxHp, 0, 1);
+    if (pr < 0.999){
+      const bw = w - 14, bx = x + 7, by = y + h - 7;
+      ctx.fillStyle = 'rgba(60,50,40,0.22)';
+      rr(ctx, bx, by, bw, 5, 2.5); ctx.fill();
+      ctx.fillStyle = pr > 0.5 ? '#4f8a4a' : (pr > 0.25 ? '#c79a26' : SEAL);
+      rr(ctx, bx, by, bw*pr, 5, 2.5); ctx.fill();
+    }
+  }
+}
+
+/* ============================================================
+   兵种详情（点击查看）：攻击力 / 攻速 / 攻击范围 的差异都摊开给玩家看
+   ============================================================ */
+function statAtkOf(t){
+  // 手牌里的牌还没落地 —— 按它落地后的属性算
+  if (!t) return 0;
+  if (t.kind === 'char') return 0;
+  if (t.kind === 'hero') return Math.round(HEROES[t.type].atk * heroAtkMul(t.level || 1));
+  const u = UNITS[t.type] || FUSE[t.type];
+  if (!u) return 0;
+  const st = TIER[t.level] || TIER[1];
+  return Math.round(u.atk * st.atkMul);
+}
+function rateOf(t){
+  if (!t) return 0;
+  if (t.kind === 'hero') return HEROES[t.type].rate * heroRateMul(t.level || 1);
+  const u = UNITS[t.type] || FUSE[t.type];
+  if (!u) return 0;
+  const st = TIER[t.level] || TIER[1];
+  return u.rate * st.rateMul;
+}
+function rangeOf(t){
+  if (!t) return 0;
+  if (t.kind === 'hero') return HEROES[t.type].range;
+  const u = UNITS[t.type] || FUSE[t.type];
+  return u ? u.range : 0;
+}
+/* 行军速度（格/秒，已含 MOVE_MUL）：只有能上路的普通兵有，名将/单字不上路 */
+function spdOf(t){
+  if (!t) return 0;
+  const u = (t.kind === 'hero') ? HEROES[t.type] : (UNITS[t.type] || FUSE[t.type]);
+  return (u && u.spd) ? u.spd * MOVE_MUL : 0;
+}
+/* ---------------- 距离一律用「格」说话：一格 = CELL 像素 ---------------- */
+function cellStr(px){
+  const c = Math.round(px / CELL * 10) / 10;
+  return (c % 1 === 0 ? c.toFixed(0) : c.toFixed(1)) + ' 格';
+}
+function spdStr(cellsPerSec){
+  if (!cellsPerSec) return '—';
+  return (Math.round(cellsPerSec * 100) / 100) + ' 格/秒';
+}
+/* 行军兵的详情：和棋盘上的守军同一套字段，只是多一句「谁派来的」 */
+function foeInfo(m){
+  const u = UNITS[m.key] || UNITS.dao;
+  const mine = m.owner === 'me';
+  return {
+    side:'foe', kind:'unit', level: m.level,
+    name: u.name + (mine ? ' · 我军出击' : ' · 来犯'),
+    char: u.char, tierName: m.level + ' 阶', color: mine ? GOLD : SEAL,
+    atk: Math.round(m.atk), rate: m.rate, range: m.range, spd: m.spd / CELL,
+    hp: Math.round(m.hp) + '/' + Math.round(m.maxHp),
+    vs: m.vs || [], desc: u.desc,
+    skill:null, skDesc:null, px:m.x, py:m.y, span:1,
+  };
+}
+/* 把任意单位整理成详情面板需要的数据 */
+function makeInspect(src, side, px, py){
+  if (!src) return null;
+  if (side === 'foe') return foeInfo(src);
+  if (src.kind === 'char'){
+    return {
+      side, kind:'char', name:'武将单字 · ' + src.char, char:src.char, tierName:'字牌', color:'#8a5a06',
+      atk:0, rate:0, range:0, spd:0, hp:null, vs: [],
+      desc:'凑齐同一个名将的两个字，把它们叠在一起就能召出武将（横占两格）',
+      skill:null, skDesc:null, px, py,
+    };
+  }
+  const isHero = src.kind === 'hero';
+  const u = isHero ? HEROES[src.type] : (UNITS[src.type] || FUSE[src.type]);
+  if (!u) return null;
+  const lv = clamp(src.level || 1, 1, MAX_TIER);
+  const tier = TIER[lv];
+  return {
+    side, kind: src.kind, level: lv,
+    name: isHero ? src.type : u.name,
+    char: src.char || u.char,
+    tierName: lv + ' 阶', color: tier.c,
+    atk: Math.round(src.atk !== undefined ? src.atk : statAtkOf(src)),
+    rate: (src.rate !== undefined ? src.rate : rateOf(src)),
+    range: (src.range !== undefined ? src.range : rangeOf(src)),
+    spd: (src.queued !== undefined ? (src.spd / CELL) : spdOf(src)),
+    hp: (src.hp !== undefined && src.maxHp) ? (Math.round(src.hp) + '/' + Math.round(src.maxHp)) : null,
+    vs: u.vs || [],
+    desc: u.desc || '',
+    skill: isHero ? u.sk : null,
+    skDesc: isHero ? u.skDesc : null,
+    span: src.cells ? src.cells.length : 1,
+    xp: isHero ? Math.floor(src.xp || 0) : null,
+    xpNeed: isHero ? heroXpNeed(src) : 0,
+    maxLv: isHero ? heroMaxLv(src) : 0,
+    px, py,
+  };
+}
+/* 点棋盘 / 手牌 / 敌军 -> 打开详情 */
+function inspectAt(side, src, idx){
+  let px = W/2, py = H/2;
+  if (side === 'my' || side === 'ai'){
+    const baseY = side === 'ai' ? Y_ENEMY : Y_MINE;
+    const p = unitPos(src, baseY);
+    px = p.x; py = p.y;
+  } else if (side === 'foe'){
+    px = src.x; py = src.y;
+  }
+  const ins = makeInspect(src, side, px, py);
+  if (!ins) return false;
+  G.inspect = ins;
+  G.inspect.cellIdx = (idx === undefined ? null : idx);
+  sfx('click');
+  return true;
+}
+function closeInspect(){ G.inspect = null; }
+
+/* 克制对象的名字：两边共用同一套兵，名字也只此一份 */
+const VS_NAME = {};
+for (const k in UNITS) VS_NAME[k] = UNITS[k].name;
+for (const k in FUSE)  VS_NAME[k] = FUSE[k].name;
+function drawInspect(){
+  const ins = G.inspect;
+  if (!ins) return;
+  // ---- 攻击范围圈 ----
+  if ((ins.side === 'my' || ins.side === 'ai' || ins.side === 'foe') && ins.range > 0){
+    const my = ins.side === 'my';
+    ctx.save();
+    ctx.fillStyle = my ? 'rgba(184,134,11,0.10)' : 'rgba(176,58,46,0.10)';
+    ctx.beginPath(); ctx.arc(ins.px, ins.py, ins.range, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = my ? 'rgba(184,134,11,0.60)' : 'rgba(176,58,46,0.55)';
+    ctx.lineWidth = 2; ctx.setLineDash([9, 7]);
+    ctx.beginPath(); ctx.arc(ins.px, ins.py, ins.range, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+  // 名将：把它占的两格框出来
+  if (G.inspect.cellIdx !== null && G.inspect.cellIdx !== undefined && (ins.side === 'my' || ins.side === 'ai')){
+    const baseY = ins.side === 'ai' ? Y_ENEMY : Y_MINE;
+    const u = (ins.side === 'ai' ? G.enBoard : G.board)[G.inspect.cellIdx];
+    if (u && u.cells){
+      ctx.save();
+      ctx.strokeStyle = GOLD; ctx.lineWidth = 2.5;
+      for (const i of u.cells){
+        rr(ctx, BX + colOf(i)*CELL + 2, baseY + rowOf(i)*CELL + 2, CELL - 4, CELL - 4, 9);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  // ---- 面板 ----
+  // 我方棋盘上的守军多一行「脱战回血」说明，所以面板要加高一点
+  const isMine = ins.side === 'my' && !!ins.kind && ins.kind !== 'char';
+  const w = 384, h = isMine ? 214 : 192;
+  const x = (W - w)/2;
+  // 点自己这边（含手牌）固定挂在上方，点对面固定挂在下方；下方那处要避开底部的兵营区
+  const y = (ins.side === 'my' || ins.side === 'hand' || ins.side === 'foe' && ins.py > H/2)
+              ? 88 : (HAND_Y - 32 - h);
+  ctx.save();
+  ctx.fillStyle = 'rgba(28,26,23,0.18)';
+  rr(ctx, x + 2, y + 4, w, h, 16); ctx.fill();
+  ctx.fillStyle = PAPER_L;
+  rr(ctx, x, y, w, h, 16); ctx.fill();
+  ctx.strokeStyle = ins.color === SEAL ? SEAL : 'rgba(90,80,65,0.30)';
+  ctx.lineWidth = 2;
+  rr(ctx, x, y, w, h, 16); ctx.stroke();
+
+  // 头部：字 + 名称 + 阶
+  ctx.fillStyle = '#fdf6e3';
+  rr(ctx, x + 14, y + 14, 52, 52, 10); ctx.fill();
+  ctx.strokeStyle = ins.color; ctx.lineWidth = 2;
+  rr(ctx, x + 14, y + 14, 52, 52, 10); ctx.stroke();
+  ctx.fillStyle = ins.color; ctx.font = '30px ' + FONT;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(ins.char, x + 40, y + 41);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = INK; ctx.font = 'bold 20px ' + FONT;
+  ctx.fillText(ins.name, x + 78, y + 32);
+  ctx.fillStyle = ins.color; ctx.font = '12px ' + FONT;
+  let sub = ins.tierName + (ins.span > 1 ? ' · 横占两格' : '');
+  if (ins.kind === 'hero'){
+    sub += (ins.level >= ins.maxLv) ? ' · 已满级'
+         : (' · 经验 ' + ins.xp + '/' + ins.xpNeed + '（杀敌自动升级）');
+  }
+  ctx.fillText(fitText(sub, x + w - 14 - (x + 78)), x + 78, y + 55);
+
+  // 三项核心属性（攻击力 / 攻速 / 攻击范围）
+  const sx = x + 14, sw = (w - 28 - 16)/3, sy = y + 78;
+  const stats = [
+    ['攻击力', ins.atk + ''],
+    ['攻速',   ins.rate ? ins.rate.toFixed(2) + '/s' : '—'],
+    ['攻击范围', ins.range ? cellStr(ins.range) : '—'],
+  ];
+  for (let i = 0; i < 3; i++){
+    const bx = sx + i*(sw + 8);
+    ctx.fillStyle = 'rgba(90,80,65,0.07)';
+    rr(ctx, bx, sy, sw, 46, 9); ctx.fill();
+    ctx.fillStyle = INK3; ctx.font = '11px ' + FONT; ctx.textAlign = 'center';
+    ctx.fillText(stats[i][0], bx + sw/2, sy + 14);
+    ctx.fillStyle = INK; ctx.font = 'bold 17px ' + FONT;
+    ctx.fillText(stats[i][1], bx + sw/2, sy + 33);
+  }
+
+  // 生命 / 克制
+  let lx = sx;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.font = '12px ' + FONT;
+  ctx.fillStyle = INK2;
+  if (ins.hp){ ctx.fillText('生命 ' + ins.hp, lx, y + 138); lx += 100; }
+  // 行军速度：一格 = CELL 像素，只对能上路的兵有意义
+  if (ins.spd){ ctx.fillText('移动 ' + spdStr(ins.spd), lx, y + 138); lx += 104; }
+  if (ins.vs && ins.vs.length){
+    const names = ins.vs.map(k => VS_NAME[k] || k).join('·');
+    ctx.fillStyle = SEAL;
+    ctx.fillText(fitText('克制 ' + names + ' ×1.6', (x + w - 14) - lx), lx, y + 138);
+  } else if (ins.kind === 'unit'){
+    ctx.fillStyle = INK3;
+    ctx.fillText('无克制', lx, y + 138);
+  }
+  // 大招 / 兵种说明（超宽自动省略，别顶出面板）
+  if (ins.skill){
+    ctx.fillStyle = GOLD; ctx.font = '12px ' + FONT;
+    ctx.fillText(fitText('大招 · ' + ins.skill + '　' + ins.skDesc, w - 28), sx, y + 158);
+  } else if (ins.desc){
+    ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+    ctx.fillText(fitText(ins.desc, w - 28), sx, y + 158);
+  }
+  // 守军的加减成：现在双方完全对称，只有「脱战回血」这一条（系数≠1 时才把倍率也写出来）
+  if (isMine){
+    ctx.textAlign = 'left'; ctx.fillStyle = '#3f8a55'; ctx.font = '12px ' + FONT;
+    let s = '脱战 ' + MY_REGEN_IDLE + ' 秒回 ' + Math.round(MY_REGEN_PCT*100) + '%';
+    if (MY_HP_MUL !== 1 || MY_DEF_MUL !== 1) s = '生命 ×' + MY_HP_MUL + ' · 防御 ×' + MY_DEF_MUL + ' · ' + s;
+    ctx.fillText(fitText(s, w - 28), sx, y + 178);
+  }
+  ctx.fillStyle = INK3; ctx.font = '11px ' + FONT; ctx.textBaseline = 'middle';
+  if (ins.side === 'hand'){
+    ctx.textAlign = 'left';
+    ctx.fillText('拖到棋盘上布阵 · 点空白处关闭', sx, y + h - 15);
+  } else {
+    ctx.textAlign = 'right';
+    ctx.fillText('点空白处关闭', x + w - 14, y + h - 15);
+  }
+  ctx.restore();
+}
+
+/* 一行放不下就截断加省略号（商城/详情面板这类固定宽度的文字框都用它） */
+function fitText(text, maxW){
+  if (maxW <= 0) return '';
+  if (ctx.measureText(text).width <= maxW) return text;
+  let s = text;
+  while (s.length > 1 && ctx.measureText(s + '…').width > maxW) s = s.slice(0, -1);
+  return s + '…';
+}
+
+function drawUnitsOnBoard(baseY, board, isEnemy){
+  for (let i = 0; i < board.length; i++){
+    const u = board[i];
+    if (!u || u.hp <= 0) continue;
+    if (!isAnchor(u, i)) continue;          // 名将只画一次（锚点格）
+    const p = unitPos(u, baseY);
+    const grow = u.born < 0.22 ? (0.6 + 0.4*(u.born/0.22)) : 1;
+    const sw = u.swing > 0 ? Math.sin((1 - u.swing/0.26) * Math.PI) * 3 : 0;
+    const w = unitW(u) * grow, h = (CELL - 12) * grow;
+    let alpha = isEnemy ? 0.94 : 1;
+    if (u.flash > 0) alpha = 1;
+    ctx.save();
+    ctx.translate(p.x + (u.swing > 0 ? sw * (isEnemy ? -1 : 1) : 0), p.y);
+    if (u.kind === 'hero' && unitCells(u).length > 1){
+      drawHeroWide(-w/2, -h/2, w, h, u, { alpha, hp: u.hp, maxHp: u.maxHp, cd: u.skCd });
+    } else {
+      drawCard(-w/2, -h/2, w, u, {
+        alpha, hp: u.hp, maxHp: u.kind === 'char' ? 0 : u.maxHp,
+        stat: (u.kind === 'unit') ? u.atk : undefined,
+        cd: u.kind === 'hero' ? u.skCd : undefined
+      });
+    }
+    if (u.flash > 0){
+      ctx.globalAlpha = u.flash * 0.55;
+      ctx.fillStyle = SEAL;
+      rr(ctx, -w/2, -h/2, w, h, 10); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    // 脱战回血：绿框一闪，提示这格正在回血（画在卡面外侧一圈，别盖住品阶边框）
+    if (u.regenT > 0){
+      ctx.globalAlpha = Math.min(1, u.regenT / 0.55) * 0.55;
+      ctx.strokeStyle = '#3f8a55'; ctx.lineWidth = 2;
+      rr(ctx, -w/2 - 4, -h/2 - 4, w + 8, h + 8, 13); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+    // 名将经验条：贴在卡面下沿，攒满自动升一阶（满阶就不再画）
+    if (u.kind === 'hero' && u.level < heroMaxLv(u)){
+      const bw = w - 12, bh = 3.5, bx = -bw/2, by = h/2 - 6;
+      const pct = clamp((u.xp || 0) / Math.max(1, heroXpNeed(u)), 0, 1);
+      ctx.fillStyle = 'rgba(60,50,40,0.28)';
+      rr(ctx, bx, by, bw, bh, 2); ctx.fill();
+      ctx.fillStyle = isEnemy ? SEAL : GOLD;
+      rr(ctx, bx, by, Math.max(1.5, bw*pct), bh, 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+/* 双方的出兵点都在各自棋盘上、正对中缝的那一格：中缝里画两个相对而指的箭头 */
+function drawGates(){
+  const cy = (MID1 + MID2) / 2;
+  const sM = spawnPos(true), sE = spawnPos(false);
+  gateArrow(sE.x, cy - 7, -1, GOLD);    // 向上：电脑棋盘里的出兵点
+  gateArrow(sM.x, cy + 7, 1, SEAL);     // 向下：我方棋盘里的出兵点
+  // 中缝只有 20px 高，提示条弹出时会盖住这行小字，所以有提示条时先让位
+  if (G.toastT > 0) return;
+  ctx.fillStyle = 'rgba(90,80,65,0.45)'; ctx.font = '11px ' + FONT;
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('中缝 · 双方的出兵点都是棋盘上的一格', BX + 4, cy);
+}
+function gateArrow(x, y, dir, color){
+  ctx.save();
+  ctx.globalAlpha = 0.55;
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y + dir*13);
+  ctx.lineTo(x - 8, y - dir*2);
+  ctx.lineTo(x + 8, y - dir*2);
+  ctx.closePath(); ctx.fill();
+  ctx.globalAlpha = 0.30;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+  ctx.setLineDash([4,4]);
+  ctx.beginPath();
+  ctx.moveTo(x - 34, y); ctx.lineTo(x + 34, y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+}
+
+/* 两侧留白上的阵营标签：竖排两个大字。
+   棋盘只占画布中间的 8 列，左右各 72px 的留白靠它填住，
+   整幅画面才是「一块完整的战场」而不是一条窄带。 */
+function drawSideTags(){
+  const tags = [
+    { baseY: Y_ENEMY, txt: '曹军', color: SEAL },
+    { baseY: Y_MINE,  txt: '汉军', color: GOLD },
+  ];
+  ctx.save();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  for (const side of [0, 1]){
+    const cx = side ? W - BX/2 : BX/2;
+    for (const t of tags){
+      const cy = t.baseY + ROWS*CELL/2;
+      ctx.globalAlpha = 0.30;
+      ctx.fillStyle = t.color; ctx.font = '19px ' + FONT;
+      ctx.fillText(t.txt[0], cx, cy - 14);
+      ctx.fillText(t.txt[1], cx, cy + 14);
+      // 标签上下各一道小短线，像一张竖着的木牌
+      ctx.globalAlpha = 0.18;
+      ctx.fillRect(cx - 9, cy - 40, 18, 1.5);
+      ctx.fillRect(cx - 9, cy + 40, 18, 1.5);
+    }
+  }
+  ctx.restore();
+}
+
+/* 路面上的兵：双方共用一套画法，靠颜色 + 箭头区分归属
+   金 = 我方出击兵（朝上打对面），红 = 来犯的兵（朝下打我的阿斗） */
+function drawMarchers(){
+  for (const e of G.marchers){
+    const mine = e.owner === 'me';
+    const s = e.w;
+    const edge = mine ? GOLD : SEAL;
+    const ink  = mine ? '#8a5a06' : SEAL;
+    ctx.save();
+    ctx.translate(e.x + (e.jit || 0), e.y + (e.jit || 0)*0.45);
+    ctx.fillStyle = 'rgba(70,60,45,0.18)';
+    ctx.beginPath(); ctx.ellipse(0, s*0.42, s*0.46, s*0.16, 0, 0, Math.PI*2); ctx.fill();
+    // 前进方向的小三角：我方朝上，敌方朝下；列队待命时改成虚线圈 + 一个「待」字
+    if (e.queued){
+      ctx.strokeStyle = edge; ctx.globalAlpha = 0.55;
+      ctx.setLineDash([4,4]); ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(0, 0, s*0.62, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.globalAlpha = 0.8; ctx.fillStyle = edge;
+      ctx.font = Math.round(s*0.32) + 'px ' + FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('待', 0, s*0.74);
+      ctx.globalAlpha = 1;
+    } else {
+      ctx.fillStyle = edge; ctx.globalAlpha = 0.5;
+      const ay = mine ? -s*0.66 : s*0.66;
+      ctx.beginPath();
+      ctx.moveTo(0, ay + (mine ? -6 : 6)); ctx.lineTo(-4.5, ay); ctx.lineTo(4.5, ay);
+      ctx.closePath(); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.fillStyle = e.hurt > 0.35 ? (mine ? '#f0e2c4' : '#e8c9c4') : (mine ? '#fdf3d6' : '#faeae7');
+    ctx.beginPath(); ctx.arc(0, 0, s*0.5, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.fillStyle = ink;
+    ctx.font = Math.round(s*0.58) + 'px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(e.char, 0, 1);
+    // 品阶数字：四个兵种长得一样，几阶全靠这个角标
+    if (e.level > 1){
+      const bs = Math.round(s*0.30);
+      ctx.fillStyle = edge;
+      rr(ctx, s*0.10, -s*0.54, bs, bs, 3); ctx.fill();
+      ctx.fillStyle = '#fffaf0';
+      ctx.font = 'bold ' + Math.round(bs*0.78) + 'px ' + FONT;
+      ctx.fillText(String(e.level), s*0.10 + bs/2, -s*0.54 + bs/2 + 0.5);
+    }
+    if (e.stun > 0){
+      ctx.strokeStyle = '#c79a26'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, -s*0.72, 4, 0, Math.PI*2); ctx.stroke();
+    }
+    if (e.slowT > 0){
+      ctx.fillStyle = 'rgba(42,95,168,0.20)';
+      ctx.beginPath(); ctx.arc(0, 0, s*0.62, 0, Math.PI*2); ctx.fill();
+    }
+    if (e.hp < e.maxHp){
+      const w = s, p = clamp(e.hp/e.maxHp,0,1);
+      ctx.fillStyle = 'rgba(60,50,40,0.25)';
+      rr(ctx, -w/2, -s*0.5 - 9, w, 4, 2); ctx.fill();
+      ctx.fillStyle = edge;
+      rr(ctx, -w/2, -s*0.5 - 9, w*p, 4, 2); ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+/* 阿斗现在是棋盘上的一格：格子里画一个阿斗，签与命数都收在这格里 */
+function drawAdu(pos, life, max, mine){
+  const { x, y, r } = pos;
+  const danger = life <= 1;
+  const cellTop = y - CELL/2;
+  const cellLeft = x - CELL/2;
+  if (mine){
+    // 保护光环
+    ctx.strokeStyle = 'rgba(184,134,11,0.26)'; ctx.lineWidth = 2;
+    ctx.setLineDash([5,7]);
+    ctx.beginPath(); ctx.arc(x, y, r + 12, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  ctx.fillStyle = 'rgba(70,60,45,0.16)';
+  ctx.beginPath(); ctx.arc(x, y+2, r, 0, Math.PI*2); ctx.fill();
+  const g = ctx.createRadialGradient(x, y-r*0.3, 4, x, y, r);
+  if (mine){ g.addColorStop(0,'#fdf6e3'); g.addColorStop(1,'#f0dfb8'); }
+  else { g.addColorStop(0,'#fbeceb'); g.addColorStop(1,'#f0d5d2'); }
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = mine ? GOLD : SEAL; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.fillStyle = mine ? '#8a5a06' : SEAL;
+  ctx.font = Math.round(r*1.25) + 'px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('斗', x, y + 1);
+
+  // 阵营小签：贴在格子左上角
+  ctx.fillStyle = mine ? GOLD : SEAL;
+  rr(ctx, cellLeft + 5, cellTop + 5, 34, 16, 5); ctx.fill();
+  ctx.fillStyle = '#fff8ec'; ctx.font = 'bold 11px ' + FONT;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(mine ? '我方' : '电脑', cellLeft + 22, cellTop + 14);
+
+  // 命数红心：排在格子底部
+  const n = Math.max(max, life);
+  const gap = 13, w0 = (n-1)*gap;
+  const hy = cellTop + CELL - 12;
+  for (let i = 0; i < n; i++){
+    const hx = x - w0/2 + i*gap;
+    const on = i < life;
+    ctx.save();
+    ctx.translate(hx, hy); ctx.scale(0.72, 0.72);
+    ctx.beginPath();
+    ctx.moveTo(0, 4);
+    ctx.bezierCurveTo(-8, -3, -3, -10, 0, -5.5);
+    ctx.bezierCurveTo(3, -10, 8, -3, 0, 4);
+    ctx.closePath();
+    ctx.fillStyle = on ? (danger ? '#d8342a' : SEAL) : 'rgba(120,105,80,0.20)';
+    ctx.fill();
+    if (on && danger){
+      ctx.globalAlpha = 0.35 + 0.35*Math.sin(G.t*8);
+      ctx.fillStyle = '#ff6a5e'; ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawHUD(){
+  // 左上：双方的对战面板（上=电脑，下=我方），一眼看出是两个玩家在打
+  const px = 14, py = 10, pw = 300, ph = 64;
+  ctx.fillStyle = 'rgba(255,255,255,0.76)';
+  rr(ctx, px, py, pw, ph, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.20)'; ctx.lineWidth = 1; ctx.stroke();
+
+  const rows = [
+    { label:'电脑', color:SEAL, dim:'rgba(176,58,46,0.40)', mantou:G.ai.mantou, merit:G.ai.merit },
+    { label:'我方', color:GOLD, dim:'rgba(184,134,11,0.42)', mantou:G.mantou, merit:G.merit },
+  ];
+  for (let i = 0; i < 2; i++){
+    const r = rows[i], cy = py + 18 + i*30;
+    // 阵营色点
+    ctx.fillStyle = r.color;
+    ctx.beginPath(); ctx.arc(px + 16, cy, 5.5, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = INK2; ctx.font = '13px ' + FONT;
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(r.label, px + 27, cy + 1);
+    // 馒头
+    ctx.fillStyle = '#d9a02b';
+    ctx.beginPath(); ctx.arc(px + 68, cy, 8, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#8a5a06'; ctx.font = '10px ' + FONT; ctx.textAlign = 'center';
+    ctx.fillText('馒', px + 68, cy + 1);
+    ctx.fillStyle = INK; ctx.font = 'bold 16px ' + FONT; ctx.textAlign = 'left';
+    ctx.fillText(Math.floor(r.mantou), px + 81, cy + 1);
+    // 战功条
+    const bx = px + 162, bw = pw - 162 - 12, bh = 12;
+    const mp = clamp(r.merit / G.meritNeed, 0, 1);
+    ctx.fillStyle = 'rgba(90,80,65,0.10)';
+    rr(ctx, bx, cy - bh/2, bw, bh, 6); ctx.fill();
+    if (mp > 0){
+      ctx.fillStyle = mp >= 1 ? r.color : r.dim;
+      rr(ctx, bx + 1, cy - bh/2 + 1, Math.max(6, (bw - 2) * mp), bh - 2, 5); ctx.fill();
+    }
+    ctx.fillStyle = mp >= 1 ? '#fff8ec' : INK3;
+    ctx.font = '10px ' + FONT; ctx.textAlign = 'center';
+    ctx.fillText('战功 ' + Math.floor(r.merit) + '/' + G.meritNeed, bx + bw/2, cy + 1);
+  }
+
+  // 右上：波次 / 时间
+  ctx.fillStyle = 'rgba(255,255,255,0.72)';
+  rr(ctx, W-204, 10, 132, 60, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.22)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.fillStyle = INK; ctx.font = 'bold 17px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('第 ' + Math.max(G.wave,1) + ' 波', W-138, 30);
+  // 第二行：下一波还有多久（任一方速清会提前开波，所以这个数字会跳）
+  // 总用时在结算面板里另有「存活时长」，这里换成更该看的倒计时。
+  const line2 = (G.phase === 'prep')
+    ? ('备战 ' + Math.ceil(Math.max(0, G.prepT)) + 's')
+    : ('下一波 ' + Math.ceil(Math.max(0, WAVE_GAP - G.waveT)) + 's');
+  ctx.fillStyle = INK3; ctx.font = '14px ' + FONT;
+  ctx.fillText(line2, W-138, 52);
+
+  // 暂停按钮（仅人机对战、战斗/备战时出现）
+  if (canPause()){
+    const b = BTN_PAUSE;
+    ctx.fillStyle = 'rgba(70,60,45,0.16)';
+    rr(ctx, b.x + 1, b.y + 2, b.w, b.h, 14); ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,0.88)';
+    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(90,80,65,0.28)'; ctx.lineWidth = 1.5;
+    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.stroke();
+    // 双竖条暂停图标
+    ctx.fillStyle = INK2;
+    rr(ctx, b.x + 16, b.y + 14, 8, 24, 3); ctx.fill();
+    rr(ctx, b.x + 28, b.y + 14, 8, 24, 3); ctx.fill();
+  }
+}
+
+function drawHandAndButtons(){
+  // 手牌区底板
+  ctx.fillStyle = 'rgba(255,255,255,0.42)';
+  rr(ctx, HAND_X0 - 14, HAND_Y - 24, (HAND_N*HAND_S + (HAND_N-1)*HAND_GAP) + 28, HAND_S + 40, 14);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.16)'; ctx.lineWidth = 1; ctx.stroke();
+
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillText('拖到熟地=守军(路上打不到) · 拖到路上=在出兵格后一格一个排队(下一波随军) · 同种同阶相叠升阶 · 两字相邻召将', HAND_X0, HAND_Y - 13);
+
+  for (let i = 0; i < HAND_N; i++){
+    const x = HAND_X0 + i*(HAND_S + HAND_GAP);
+    const t = G.hand[i];
+    if (t){
+      if (G.dragger && G.dragger.from.kind === 'hand' && G.dragger.from.i === i) continue;
+      drawCard(x, HAND_Y, HAND_S, t, { stat: t.kind === 'unit' ? statAtkOf(t) : undefined });
+    } else {
+      ctx.strokeStyle = 'rgba(90,80,65,0.16)'; ctx.lineWidth = 1.5;
+      ctx.setLineDash([5,5]);
+      rr(ctx, x, HAND_Y, HAND_S, HAND_S, 10); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // 拖拽中：高亮手牌格作为落点（拖回来 = 换位 / 收回）
+  if (G.dragger && G.dragger.moved){
+    const hs = handSlotAt({ x: G.dragger.x, y: G.dragger.y });
+    if (hs >= 0){
+      const x = HAND_X0 + hs*(HAND_S + HAND_GAP);
+      const occupied = !!G.hand[hs];
+      ctx.save();
+      // 红环 = 和这格换位；绿环 = 空位，收进兵营
+      ctx.strokeStyle = occupied ? SEAL : '#4f8a4a';
+      ctx.lineWidth = 3;
+      ctx.setLineDash([7, 5]);
+      rr(ctx, x - 3, HAND_Y - 3, HAND_S + 6, HAND_S + 6, 12); ctx.stroke();
+      ctx.restore();
+      ctx.globalAlpha = occupied ? 0.10 : 0.14;
+      ctx.fillStyle = occupied ? SEAL : '#4f8a4a';
+      rr(ctx, x - 3, HAND_Y - 3, HAND_S + 6, HAND_S + 6, 12); ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // 征兵按钮
+  const b = BTN_ENLIST;
+  const afford = G.mantou >= G.enlistCost;
+  const bg = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
+  bg.addColorStop(0, afford ? '#c0483a' : '#b8ada0');
+  bg.addColorStop(1, afford ? '#9e3226' : '#a49a8d');
+  ctx.fillStyle = 'rgba(70,60,45,0.18)';
+  rr(ctx, b.x+2, b.y+3, b.w, b.h, 12); ctx.fill();
+  ctx.fillStyle = bg;
+  rr(ctx, b.x, b.y, b.w, b.h, 12); ctx.fill();
+  ctx.fillStyle = '#fff6ee'; ctx.font = 'bold 22px ' + FONT;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('征 兵  ' + G.enlistCost, b.x + b.w/2, b.y + 21);
+  ctx.font = '12px ' + FONT;
+  ctx.fillText('刷新全部 5 格 · 旧牌上战场', b.x + b.w/2, b.y + 45);
+
+  // 主动道具槽
+  for (let i = 0; i < 2; i++){
+    const s = SLOT[i], id = G.actives[i];
+    ctx.fillStyle = id ? '#fdf6e3' : 'rgba(255,255,255,0.40)';
+    rr(ctx, s.x, s.y, SLOT_S, SLOT_S, 10); ctx.fill();
+    ctx.strokeStyle = id ? GOLD : 'rgba(90,80,65,0.20)';
+    ctx.lineWidth = id ? 2 : 1.5;
+    if (!id) ctx.setLineDash([5,5]);
+    rr(ctx, s.x, s.y, SLOT_S, SLOT_S, 10); ctx.stroke();
+    ctx.setLineDash([]);
+    if (id){
+      ctx.fillStyle = '#8a5a06'; ctx.font = '30px ' + FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(ITEMS[id].icon, s.x + SLOT_S/2, s.y + SLOT_S/2 + 1);
+    } else {
+      ctx.fillStyle = 'rgba(90,80,65,0.30)'; ctx.font = '11px ' + FONT;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('道具', s.x + SLOT_S/2, s.y + SLOT_S/2);
+    }
+  }
+  // 羁绊 + 被动道具
+  const bs = [];
+  for (const b of BONDS) if (G.bondOn[b.id]) bs.push(b.name);
+  const ps = [];
+  for (const k in G.passive) if (G.passive[k]) ps.push(ITEMS[k].icon);
+  ctx.font = '13px ' + FONT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  if (bs.length){
+    ctx.fillStyle = '#8a5a06';
+    ctx.fillText('羁绊 · ' + bs.join(' / ') + (ps.length ? ('　被动：' + ps.join(' ')) : ''), 20, 1600);
+  } else if (ps.length){
+    ctx.fillStyle = INK3;
+    ctx.fillText('被动：' + ps.join(' '), 20, 1600);
+  } else {
+    ctx.fillStyle = INK3;
+    ctx.fillText('馒头只从「杀掉敌军」里来 · 你守下半场，电脑守上半场', 20, 1600);
+  }
+  if (G.aduShield > 0){
+    ctx.fillStyle = GOLD; ctx.font = 'bold 15px ' + FONT; ctx.textAlign = 'right';
+    ctx.fillText('神兵符 无敌 ' + G.aduShield.toFixed(1) + 's', W-20, 1600);
+  }
+}
+
+function drawFx(){
+  for (const f of G.fx){
+    const p = f.t / f.dur;
+    if (f.type === 'beam'){
+      ctx.save();
+      ctx.globalAlpha = (1-p) * 0.9;
+      ctx.strokeStyle = GOLD; ctx.lineWidth = 16*(1-p) + 4; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(f.x1, f.y1); ctx.lineTo(f.x2, f.y1 + (f.y2-f.y1)); ctx.stroke();
+      ctx.strokeStyle = '#fff3cc'; ctx.lineWidth = 5*(1-p) + 1;
+      ctx.beginPath(); ctx.moveTo(f.x1, f.y1); ctx.lineTo(f.x2, f.y1 + (f.y2-f.y1)); ctx.stroke();
+      ctx.restore();
+    } else if (f.type === 'ring'){
+      ctx.save();
+      ctx.globalAlpha = (1-p) * 0.85;
+      ctx.strokeStyle = f.color || INK; ctx.lineWidth = 10*(1-p) + 2;
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r0 + (f.r1-f.r0)*p, 0, Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
+  }
+  for (const p of G.parts){
+    const a = 1 - p.t/p.dur;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.r*(0.4+a*0.6), 0, Math.PI*2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (const f of G.floaters){
+    const a = 1 - f.t/f.dur;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = f.color;
+    ctx.font = 'bold 17px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawDragger(){
+  if (!G.dragger) return;
+  const d = G.dragger;
+  const isHero = d.tile.kind === 'hero';
+  const h = CELL - 12;
+  const w = isHero ? h * 2 + 8 : h;
+  // 名将：先把要占的两个格子亮出来
+  if (isHero){
+    const mi = boardCellAt({ x: d.x, y: d.y }, Y_MINE);
+    if (mi >= 0){
+      const allow = d.from.kind === 'board' ? [d.from.idx] : [];
+      const span = findHeroSpan(mi, G.board, true, allow);
+      if (span){
+        ctx.save();
+        ctx.strokeStyle = 'rgba(184,134,11,0.85)'; ctx.lineWidth = 2.5;
+        ctx.setLineDash([7,5]);
+        for (const i of span){
+          rr(ctx, BX + colOf(i)*CELL + 2, Y_MINE + rowOf(i)*CELL + 2, CELL-4, CELL-4, 9);
+          ctx.stroke();
+        }
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
+  }
+  ctx.save();
+  ctx.globalAlpha = 0.94;
+  ctx.shadowColor = 'rgba(0,0,0,0.25)'; ctx.shadowBlur = 14; ctx.shadowOffsetY = 6;
+  if (isHero) drawHeroWide(d.x - w/2, d.y - h/2, w, h, d.tile, {});
+  else drawCard(d.x - w/2, d.y - h/2, h, d.tile, {});
+  ctx.restore();
+}
+
+function drawToast(){
+  if (G.toastT <= 0) return;
+  const a = clamp(G.toastT / 0.35, 0, 1);
+  ctx.save();
+  ctx.globalAlpha = a;
+  ctx.font = '17px ' + FONT;
+  const w = ctx.measureText(G.toast).width + 44;
+  const x = W/2 - w/2, y = (MID1 + MID2)/2 - 21;
+  ctx.fillStyle = 'rgba(43,38,32,0.86)';
+  rr(ctx, x, y, w, 40, 20); ctx.fill();
+  ctx.fillStyle = '#f6efe2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(G.toast, W/2, y + 21);
+  ctx.restore();
+}
+
+/* ---------------- 说明页 ---------------- */
+function drawIntro(){
+  ctx.fillStyle = 'rgba(28,26,23,0.55)'; ctx.fillRect(0,0,W,H);
+  const pw = 620, ph = 900, px = (W-pw)/2, py = (H-ph)/2;
+  ctx.fillStyle = PAPER_L;
+  rr(ctx, px, py, pw, ph, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.25)'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK; ctx.font = '44px ' + FONT;
+  ctx.fillText('WordTower', W/2, py + 64);
+  ctx.fillStyle = SEAL; ctx.font = '15px ' + FONT;
+  ctx.fillText('1V1 上下分屏 · 双线对攻 · 文字塔防', W/2, py + 102);
+
+  const lines = [
+    ['一', '两块战场', '上下各有一块 8×8 棋盘，各守一个阿斗；不设时间上限，哪边阿斗先被打光就输'],
+    ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局只有 5 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
+    ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝沿自家路赶到出兵格后面、一格一个排好队（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
+    ['四', '征兵', '开局 8 馒头；征一次 5 个，之后每征一次 +1，只涨不降（旧兵与铲子回收成馒头）；兵营里的单字会在征兵时自动换成 1 级兵，直接排上我方路'],
+    ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；阿斗每挨一击补 3'],
+    ['六', '合成与成长', '同种同阶相叠升阶（1+1 → 2 阶）；两字相邻召将；名将杀敌攒经验自动升阶 —— 合成不是唯一的路'],
+    ['七', '点击查看', '点棋盘上任意单位或手牌，都能看到攻击力、攻速、范围与移动速度（都按「格」算）'],
+  ];
+  ctx.textAlign = 'left';
+  for (let i = 0; i < lines.length; i++){
+    const ly = py + 142 + i*66;
+    ctx.fillStyle = 'rgba(176,58,46,0.10)';
+    rr(ctx, px + 34, ly - 20, 40, 40, 10); ctx.fill();
+    ctx.fillStyle = SEAL; ctx.font = '22px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(lines[i][0], px + 54, ly + 1);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = INK; ctx.font = 'bold 19px ' + FONT;
+    ctx.fillText(lines[i][1], px + 88, ly - 12);
+    ctx.fillStyle = INK2; ctx.font = '14px ' + FONT;
+    wrapText(lines[i][2], px + 88, ly + 14, pw - 130, 19);
+  }
+
+  // 名将一览
+  ctx.textAlign = 'left';
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
+  ctx.fillText('金色名将（上限 5 阶）', px + 40, py + 590);
+  for (let i = 0; i < 6; i++){
+    const n = GOLD_HEROES[i], h = HEROES[n];
+    const x = px + 40 + i*90, y = py + 610;
+    ctx.fillStyle = '#fdf3d6'; rr(ctx, x, y, 76, 46, 8); ctx.fill();
+    ctx.strokeStyle = '#d8b64f'; ctx.lineWidth = 1.5; rr(ctx, x, y, 76, 46, 8); ctx.stroke();
+    ctx.fillStyle = '#8a5a06'; ctx.font = '15px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(n, x + 38, y + 17);
+    ctx.fillStyle = '#a8720b'; ctx.font = '11px ' + FONT;
+    ctx.fillText(h.a + '+' + h.b, x + 38, y + 34);
+  }
+  ctx.textAlign = 'left';
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
+  ctx.fillText('紫色名将（上限 3 阶）', px + 40, py + 682);
+  for (let i = 0; i < 6; i++){
+    const n = PURPLE_HEROES[i], h = HEROES[n];
+    const x = px + 40 + i*90, y = py + 702;
+    ctx.fillStyle = '#f4ecfb'; rr(ctx, x, y, 76, 46, 8); ctx.fill();
+    ctx.strokeStyle = '#b08ed0'; ctx.lineWidth = 1.5; rr(ctx, x, y, 76, 46, 8); ctx.stroke();
+    ctx.fillStyle = '#5f2f88'; ctx.font = '15px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(n, x + 38, y + 17);
+    ctx.fillStyle = '#7a4aa8'; ctx.font = '11px ' + FONT;
+    ctx.fillText(h.a + '+' + h.b, x + 38, y + 34);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT; ctx.textBaseline = 'middle';
+  ctx.fillText('羁绊：单骑救主（赵云）· 万人敌（关羽+张飞）· 五虎上将 · 桃园结义', W/2, py + 772);
+  ctx.fillStyle = SEAL; ctx.font = '13px ' + FONT;
+  ctx.fillText('操作：拖动布阵 · 相邻两字自动召名将 · 拖到已有守军的格子上可换位', W/2, py + 798);
+
+  const b = { x: W/2 - 150, y: py + ph - 78, w: 300, h: 58 };
+  G._startBtn = b;
+  ctx.fillStyle = 'rgba(70,60,45,0.18)';
+  rr(ctx, b.x+2, b.y+3, b.w, b.h, 14); ctx.fill();
+  const bg = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
+  bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
+  ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+  ctx.fillStyle = '#fff6ee'; ctx.font = '26px ' + FONT;
+  ctx.fillText('长 坂 坡 · 开 战', W/2, b.y + b.h/2 + 1);
+}
+function wrapText(text, x, y, maxW, lh){
+  const chars = text.split('');
+  let line = '', ly = y;
+  for (const ch of chars){
+    if (ctx.measureText(line + ch).width > maxW){ ctx.fillText(line, x, ly); line = ch; ly += lh; }
+    else line += ch;
+  }
+  if (line) ctx.fillText(line, x, ly);
+}
+
+/* ---------------- 商人 ---------------- */
+function drawShop(){
+  ctx.fillStyle = 'rgba(28,26,23,0.62)'; ctx.fillRect(0,0,W,H);
+  const pw = 620, ph = 560, px = (W-pw)/2, py = (H-ph)/2;
+  ctx.fillStyle = PAPER_L;
+  rr(ctx, px, py, pw, ph, 18); ctx.fill();
+  ctx.strokeStyle = GOLD; ctx.lineWidth = 2; ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#8a5a06'; ctx.font = '34px ' + FONT;
+  ctx.fillText('神 秘 商 人', W/2, py + 52);
+  ctx.fillStyle = INK3; ctx.font = '14px ' + FONT;
+  ctx.fillText('主动道具最多带 2 件 · 当前馒头 ' + Math.floor(G.mantou), W/2, py + 86);
+
+  G._shopBtns = [];
+  for (let i = 0; i < 3; i++){
+    const id = G.shopStock[i];
+    const y = py + 118 + i*118;
+    ctx.fillStyle = id ? '#f7f1e4' : 'rgba(0,0,0,0.04)';
+    rr(ctx, px + 34, y, pw - 68, 100, 12); ctx.fill();
+    ctx.strokeStyle = 'rgba(90,80,65,0.20)'; ctx.lineWidth = 1; ctx.stroke();
+    if (!id){
+      ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+      ctx.fillText('—— 已售出 ——', W/2, y + 50);
+      continue;
+    }
+    const it = ITEMS[id];
+    const rc = { gold:'#d8b64f', purple:'#b08ed0', blue:'#8fb2e2', green:'#8cc5a2' }[it.rarity] || '#cdc4b4';
+    ctx.fillStyle = '#fdf6e3'; rr(ctx, px + 50, y + 18, 64, 64, 10); ctx.fill();
+    ctx.strokeStyle = rc; ctx.lineWidth = 2; rr(ctx, px + 50, y + 18, 64, 64, 10); ctx.stroke();
+    ctx.fillStyle = '#8a5a06'; ctx.font = '32px ' + FONT;
+    ctx.fillText(it.icon, px + 82, y + 51);
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = INK; ctx.font = 'bold 19px ' + FONT;
+    ctx.fillText(it.name, px + 130, y + 36);
+    ctx.fillStyle = INK2; ctx.font = '14px ' + FONT;
+    ctx.fillText(it.desc, px + 130, y + 62);
+    ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+    ctx.fillText(it.type === 'active' ? '主动' : '被动', px + 130, y + 84);
+
+    const bb = { x: px + pw - 158, y: y + 30, w: 110, h: 44 };
+    G._shopBtns.push({ id, r: bb });
+    const afford = G.mantou >= it.cost;
+    ctx.fillStyle = afford ? '#c0483a' : 'rgba(140,130,115,0.5)';
+    rr(ctx, bb.x, bb.y, bb.w, bb.h, 10); ctx.fill();
+    ctx.fillStyle = '#fff6ee'; ctx.font = 'bold 17px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText(it.cost + ' 馒', bb.x + bb.w/2, bb.y + bb.h/2 + 1);
+    ctx.textAlign = 'left';
+  }
+  const cb = { x: W/2 - 110, y: py + ph - 74, w: 220, h: 50 };
+  G._shopClose = cb;
+  ctx.fillStyle = 'rgba(90,80,65,0.15)';
+  rr(ctx, cb.x, cb.y, cb.w, cb.h, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.30)'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = INK2; ctx.font = '19px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('继续迎战', cb.x + cb.w/2, cb.y + cb.h/2 + 1);
+  ctx.textAlign = 'left';
+}
+
+/* ---------------- 结算 ---------------- */
+function drawOver(){
+  ctx.fillStyle = 'rgba(28,26,23,0.66)'; ctx.fillRect(0,0,W,H);
+  const win = G.result === 'win';
+  const pw = 560, ph = 508, px = (W-pw)/2, py = (H-ph)/2;
+  ctx.fillStyle = PAPER_L;
+  rr(ctx, px, py, pw, ph, 18); ctx.fill();
+  ctx.strokeStyle = win ? GOLD : SEAL; ctx.lineWidth = 2.5; ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = win ? '#8a5a06' : SEAL;
+  ctx.font = '46px ' + FONT;
+  ctx.fillText(win ? '杀 出 重 围' : '阿 斗 失 守', W/2, py + 80);
+  ctx.fillStyle = INK2; ctx.font = '16px ' + FONT;
+  ctx.fillText(win ? '曹军攻势溃散，幼主无恙' : '敌将破阵而入，长坂坡难守', W/2, py + 124);
+
+  const rows = [
+    ['坚守波次', G.wave + ' 波'],
+    ['斩敌', G.kills + ' 骑'],
+    ['漏过防线', G.leaks + ' 骑'],
+    ['我方阿斗余命', Math.max(0,G.myLife) + ' / ' + G.myMax],
+    ['敌方阿斗余命', Math.max(0,G.enLife) + ' / ' + G.enMax],
+    ['存活时长', Math.floor(G.time/60) + ':' + ('0' + Math.floor(G.time%60)).slice(-2)],
+  ];
+  for (let i = 0; i < rows.length; i++){
+    const y = py + 172 + i*40;
+    ctx.fillStyle = 'rgba(90,80,65,0.06)';
+    rr(ctx, px + 46, y - 16, pw - 92, 32, 8); ctx.fill();
+    ctx.fillStyle = INK2; ctx.font = '16px ' + FONT; ctx.textAlign = 'left';
+    ctx.fillText(rows[i][0], px + 66, y);
+    ctx.fillStyle = INK; ctx.font = 'bold 18px ' + FONT; ctx.textAlign = 'right';
+    ctx.fillText(rows[i][1], px + pw - 66, y);
+  }
+  const b = { x: W/2 - 130, y: py + ph - 84, w: 260, h: 56 };
+  G._againBtn = b;
+  const bg = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
+  bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
+  ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+  ctx.fillStyle = '#fff6ee'; ctx.font = '23px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('再 战 一 局', W/2, b.y + b.h/2 + 1);
+}
+
+/* ---------------- 暂停面板 ---------------- */
+function drawPause(){
+  ctx.fillStyle = 'rgba(28,26,23,0.66)'; ctx.fillRect(0,0,W,H);
+  const pw = 520, ph = 430, px = (W-pw)/2, py = (H-ph)/2;
+  ctx.fillStyle = PAPER_L;
+  rr(ctx, px, py, pw, ph, 20); ctx.fill();
+  ctx.strokeStyle = 'rgba(90,80,65,0.35)'; ctx.lineWidth = 2; ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK; ctx.font = '42px ' + FONT;
+  ctx.fillText('暂 停', W/2, py + 66);
+  ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
+  ctx.fillText('战场已冻结 · 空格 / P 键也能继续', W/2, py + 108);
+
+  // 当前战况
+  const el = Math.max(0, G.time);
+  const info = [
+    ['第 ' + Math.max(G.wave,1) + ' 波', '波次'],
+    [Math.floor(G.mantou) + '', '馒头'],
+    [Math.floor(el/60) + ':' + ('0' + Math.floor(el%60)).slice(-2), '用时'],
+    [Math.max(0,G.myLife) + ' / ' + G.myMax, '阿斗'],
+  ];
+  ctx.fillStyle = 'rgba(90,80,65,0.07)';
+  rr(ctx, px + 34, py + 132, pw - 68, 54, 12); ctx.fill();
+  for (let i = 0; i < info.length; i++){
+    const cx = px + 34 + (pw - 68) * (i + 0.5) / info.length;
+    ctx.fillStyle = INK3; ctx.font = '11px ' + FONT;
+    ctx.fillText(info[i][1], cx, py + 150);
+    ctx.fillStyle = INK; ctx.font = 'bold 19px ' + FONT;
+    ctx.fillText(info[i][0], cx, py + 172);
+  }
+
+  const items = [
+    { id:'resume',  label:'继 续 迎 战', primary:true },
+    { id:'restart', label:'重 新 开 始', primary:false },
+    { id:'mute',    label: muted ? '音 效 · 关' : '音 效 · 开', primary:false },
+  ];
+  G._pauseBtns = [];
+  for (let i = 0; i < items.length; i++){
+    const it = items[i];
+    const b = { x: W/2 - 150, y: py + 204 + i*72, w: 300, h: 56 };
+    G._pauseBtns.push({ id: it.id, r: b });
+    if (it.primary){
+      ctx.fillStyle = 'rgba(70,60,45,0.18)';
+      rr(ctx, b.x + 2, b.y + 3, b.w, b.h, 14); ctx.fill();
+      const bg = ctx.createLinearGradient(0, b.y, 0, b.y + b.h);
+      bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
+      ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+      ctx.fillStyle = '#fff6ee';
+    } else {
+      ctx.fillStyle = 'rgba(90,80,65,0.12)';
+      rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+      ctx.strokeStyle = 'rgba(90,80,65,0.30)'; ctx.lineWidth = 1.5;
+      rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.stroke();
+      ctx.fillStyle = INK2;
+    }
+    ctx.font = (it.primary ? 'bold 23px ' : '20px ') + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(it.label, b.x + b.w/2, b.y + b.h/2 + 1);
+  }
+}
+
+/* ---------------- 主绘制 ---------------- */
+function draw(){
+  drawBg();
+  drawBoardBase(Y_ENEMY, G.enBoard, true);
+  drawBoardBase(Y_MINE, G.board, false);
+  drawSideTags();
+  drawUnitsOnBoard(Y_ENEMY, G.enBoard, true);
+  drawUnitsOnBoard(Y_MINE, G.board, false);
+  drawAdu(ADU_E, G.enLife, G.enMax, false);
+  drawAdu(ADU_M, G.myLife, G.myMax, true);
+  drawGates();
+
+  drawMarchers();
+  drawFx();
+  drawHUD();
+  drawHandAndButtons();
+  drawInspect();
+  drawDragger();
+  drawToast();
+
+  if (G.phase === 'intro') drawIntro();
+  if (G.phase === 'shop') drawShop();
+  if (G.phase === 'over') drawOver();
+  if (G.paused) drawPause();
+}
+
+/* ============================================================
+   输入
+   ============================================================ */
+function toLogical(ev){
+  const r = cv.getBoundingClientRect();
+  return { x: (ev.clientX - r.left) / SCALE, y: (ev.clientY - r.top) / SCALE };
+}
+/* 落在第几个兵营格上（不管这格现在有没有牌），没落上返回 -1 */
+function handSlotAt(p){
+  if (p.y < HAND_Y || p.y > HAND_Y + HAND_S) return -1;
+  for (let i = 0; i < HAND_N; i++){
+    const x = HAND_X0 + i*(HAND_S + HAND_GAP);
+    if (p.x >= x && p.x <= x + HAND_S) return i;
+  }
+  return -1;
+}
+/* 只认有牌的那一格（要先有牌才拿得起来） */
+function handIndexAt(p){
+  const i = handSlotAt(p);
+  return (i >= 0 && G.hand[i]) ? i : -1;
+}
+function boardCellAt(p, baseY){
+  if (p.x < BX || p.x > BX + COLS*CELL) return -1;
+  if (p.y < baseY || p.y > baseY + ROWS*CELL) return -1;
+  const c = Math.floor((p.x - BX)/CELL), r = Math.floor((p.y - baseY)/CELL);
+  if (c < 0 || c >= COLS || r < 0 || r >= ROWS) return -1;
+  return c + r*COLS;
+}
+
+function onDown(ev){
+  ev.preventDefault();
+  const p = toLogical(ev);
+
+  // 暂停中：只响应暂停面板
+  if (G.paused){
+    for (const b of (G._pauseBtns || [])) if (inRect(p, b.r)){ pauseAction(b.id); return; }
+    return;
+  }
+
+  G.dragger = null;
+
+  // 暂停按钮
+  if (canPause() && inRect(p, BTN_PAUSE)){ setPaused(true); return; }
+
+  if (G.phase === 'intro'){
+    if (G._startBtn && inRect(p, G._startBtn)){ sfx('click'); startBattle(); }
+    return;
+  }
+  if (G.phase === 'over'){
+    if (G._againBtn && inRect(p, G._againBtn)){ sfx('click'); newGame(); startBattle(); }
+    return;
+  }
+  if (G.phase === 'shop'){
+    if (G._shopClose && inRect(p, G._shopClose)){ sfx('click'); closeShop(); return; }
+    for (const b of (G._shopBtns || [])) if (inRect(p, b.r)){ buyItem(b.id); return; }
+    return;
+  }
+
+  // 征兵
+  if (inRect(p, BTN_ENLIST)){ enlist(); return; }
+  // 道具槽
+  for (let i = 0; i < 2; i++){
+    const s = SLOT[i];
+    if (p.x >= s.x && p.x <= s.x+SLOT_S && p.y >= s.y && p.y <= s.y+SLOT_S){ useActive(i); return; }
+  }
+
+  // 曾经打开的详情面板：点到空白处即关闭
+  const hadInspect = !!G.inspect;
+
+  // 上半场（电脑方）：只用来查看，不能操作
+  const ei = boardCellAt(p, Y_ENEMY);
+  if (ei >= 0 && G.enBoard[ei]){
+    inspectAt('ai', G.enBoard[ei], ei);
+    return;
+  }
+  // 场上行进的敌军：也能点开看
+  for (const e of G.marchers){ if (Math.hypot(e.x - p.x, e.y - p.y) <= 34){ inspectAt('foe', e); return; } }
+
+  // 拿手牌
+  const hi = handIndexAt(p);
+  if (hi >= 0){
+    closeInspect();
+    G.dragger = { from:{ kind:'hand', i:hi }, tile:G.hand[hi], x:p.x, y:p.y, sx:p.x, sy:p.y, moved:false };
+    return;
+  }
+  // 拿我方的牌（名将会连带它占的另一格一起拿起）
+  const mi = boardCellAt(p, Y_MINE);
+  if (mi >= 0 && G.board[mi]){
+    const u = G.board[mi];
+    closeInspect();
+    if (u.kind === 'hero'){
+      // 名将横占两格：抓到哪一格就拎起哪个字（左格 = 名字第一个字）
+      const h = HEROES[u.type];
+      const i0 = (u.cells && u.cells.length) ? u.cells[0] : mi;
+      const ch = (mi === i0) ? h.a : h.b;
+      G.dragger = {
+        from:{ kind:'board', idx:mi, splitHero:true },
+        tile:{ kind:'char', char:ch, level:0 },
+        x:p.x, y:p.y, sx:p.x, sy:p.y, moved:false
+      };
+      return;
+    }
+    G.dragger = {
+      from:{ kind:'board', idx:u.cell !== undefined ? u.cell : mi },
+      tile:{ kind: u.kind === 'char' ? 'char' : 'unit',
+             type: u.type, char: u.char, level: u.level },
+      x:p.x, y:p.y, sx:p.x, sy:p.y, moved:false
+    };
+    return;
+  }
+  if (hadInspect) closeInspect();
+}
+function onMove(ev){
+  if (G.paused || !G.dragger) return;
+  ev.preventDefault();
+  const p = toLogical(ev);
+  G.dragger.x = p.x; G.dragger.y = p.y;
+  if (Math.hypot(p.x - G.dragger.sx, p.y - G.dragger.sy) > 8) G.dragger.moved = true;
+}
+function onUp(ev){
+  if (G.paused){ G.dragger = null; return; }
+  const d = G.dragger;
+  if (!d) return;
+  G.dragger = null;
+  if (G.phase !== 'battle' && G.phase !== 'prep') return;
+  const p = toLogical(ev);
+
+  // 只是点了一下（没有拖动）-> 打开兵种详情
+  if (!d.moved){
+    if (d.from.kind === 'hand'){
+      const t = G.hand[d.from.i];
+      if (t) inspectAt('hand', t);
+    } else {
+      const u = G.board[d.from.idx];
+      if (u) inspectAt('my', u, d.from.idx);
+    }
+    return;
+  }
+
+  // 名将拆字：拖动即解除，先还原成两个单字，拖走的那个字继续按普通单字落地
+  if (d.from.kind === 'board' && d.from.splitHero){
+    const nm = splitHero(d.from.idx);
+    if (nm) toast('拆字 · ' + nm + ' 解除，' + d.tile.char + ' 可以单独挪走');
+    refreshBonds();
+  }
+
+  const mi = boardCellAt(p, Y_MINE);
+  const hslot = handSlotAt(p);
+
+  if (mi >= 0){
+    const src = { kind:d.tile.kind, type:d.tile.type, char:d.tile.char, level:d.tile.level };
+    if (d.from.kind === 'board') src.__fromBoard = d.from.idx;
+    // 手牌先腾出这一格再落子：换位时对方那张牌才有地方收。
+    // 以前是落完再清格，兵营看着是满的，换出来的牌会被「遣散」白扔。
+    const handBack = (d.from.kind === 'hand') ? G.hand[d.from.i] : null;
+    if (d.from.kind === 'hand') G.hand[d.from.i] = null;
+    const res = dropOnCell(src, mi);      // 来源格的清理已由 dropOnCell 负责
+    if ((res === 'fail' || res === 'shovel-no') && handBack) G.hand[d.from.i] = handBack;
+    // 拆字后没落成（点到了放不下的地方）：两个字还挨着，自动并回原来的名将
+    if (res === 'fail' && d.from.splitHero) autoFormHeroes(G.board, true);
+    // 手牌只要真落到了棋盘上就用掉这一张（落子前已清格；失败在上面原样放回）
+    return;
+  }
+
+  // ---- 拖到兵营的五个格子上（空格也能放）----
+  if (hslot >= 0){
+    if (d.from.kind === 'hand'){
+      if (hslot === d.from.i) return;                    // 原地放下，什么都不做
+      const srcT = G.hand[d.from.i], dstT = G.hand[hslot];
+      // 手牌之间也能合成／升阶：同种同阶升一阶、两张单字拼名将（异字合成已关）
+      const comb = (srcT && dstT && srcT.kind !== 'shovel' && dstT.kind !== 'shovel')
+        ? tryCombine(d.tile, dstT) : null;
+      if (!comb && srcT && dstT && srcT.kind === 'unit' && dstT.kind === 'unit')
+        toast('合不了 · 只能同种同阶相叠（1+1 → 2 阶）');
+      if (comb){
+        G.hand[hslot] = comb;                            // 合成结果留在这一格
+        G.hand[d.from.i] = null;                         // 源格空出来
+        const x = HAND_X0 + hslot*(HAND_S + HAND_GAP) + HAND_S/2;
+        burst(x, HAND_Y + HAND_S/2, 16, comb.kind === 'hero' ? GOLD : SEAL);
+        floater(x, HAND_Y - 2, comb.kind === 'hero' ? (comb.type + '！') : (comb.level + ' 阶'),
+                comb.kind === 'hero' ? GOLD : TIER[comb.level].c);
+        toast(comb.kind === 'hero' ? ('兵营召将 · ' + comb.type + '「' + HEROES[comb.type].sk + '」')
+                                   : ('兵营合成 · ' + tileLabel(comb) + ' ' + comb.level + ' 阶'));
+        sfx(comb.kind === 'hero' ? 'hero' : 'merge');
+        return;
+      }
+      const t = dstT;                                    // 合不了就对调
+      G.hand[hslot] = G.hand[d.from.i];
+      G.hand[d.from.i] = t;
+      sfx('click');
+      return;
+    }
+    // 棋盘 -> 兵营格：和这一格里的牌对调；空格则直接挪进来，原格腾空
+    const back = G.hand[hslot];
+    if (back && back.kind === 'hero'){
+      const span = findHeroSpan(d.from.idx, G.board, true, [d.from.idx]);
+      if (!span){ toast('名将横占两格 · 兵营这一格放不下'); sfx('hit'); return; }
+      clearCells(G.board, d.from.idx);
+      const nu = newUnit(back.type, back.level, span[0], span);
+      nu.born = 0;
+      for (const i of span) G.board[i] = nu;
+      G.hand[hslot] = d.tile;
+    } else {
+      clearCells(G.board, d.from.idx);
+      if (back){ const nu = toUnitObject(back, d.from.idx); if (nu) G.board[d.from.idx] = nu; }
+      G.hand[hslot] = d.tile;
+    }
+    refreshBonds(); autoFormHeroes(G.board, true); ensureMyBuffs();
+    sfx('click');
+    return;
+  }
+
+  // 拖回兵营区域（没对准具体某一格）-> 从棋盘收回（名将整组收回）
+  if (d.from.kind === 'board' && p.y > HAND_Y - 50 && p.y < HAND_Y + HAND_S + 50){
+    if (handAdd(d.tile)){
+      clearCells(G.board, d.from.idx);
+      refreshBonds(); autoFormHeroes(G.board, true); ensureMyBuffs();
+      sfx('click');
+    } else {
+      toast('兵营已满 · 收不回来');
+    }
+  }
+}
+
+function bindInput(){
+  cv.addEventListener('pointerdown', onDown, { passive:false });
+  cv.addEventListener('pointermove', onMove, { passive:false });
+  cv.addEventListener('pointerup', onUp, { passive:false });
+  cv.addEventListener('pointercancel', () => { G.dragger = null; });
+  cv.addEventListener('contextmenu', e => e.preventDefault());
+
+  // 键盘：空格 / P / Esc 暂停或继续，M 静音
+  window.addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === ' ' || k === 'Spacebar' || k === 'p' || k === 'P' || k === 'Escape'){
+      e.preventDefault();
+      if (G.paused) pauseAction('resume');
+      else if (canPause()) setPaused(true);
+      return;
+    }
+    if (k === 'm' || k === 'M'){ muted = !muted; }
+  });
+}
+
+/* ============================================================
+   主循环
+   ============================================================ */
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const ww = window.innerWidth, wh = window.innerHeight;
+  SCALE = Math.min(ww / W, wh / H);
+  cv.width = Math.round(W * SCALE * DPR);
+  cv.height = Math.round(H * SCALE * DPR);
+  cv.style.width = (W * SCALE) + 'px';
+  cv.style.height = (H * SCALE) + 'px';
+  ctx.setTransform(SCALE*DPR, 0, 0, SCALE*DPR, 0, 0);
+}
+
+let last = 0;
+function loop(ts){
+  if (!last) last = ts;
+  let dt = (ts - last) / 1000;
+  last = ts;
+  if (dt > 0.05) dt = 0.05;
+  if (G.paused){ draw(); requestAnimationFrame(loop); return; }   // 暂停：全局冻结，只重绘
+  G.t += dt;
+  step(dt);
+  if (G.toastT > 0) G.toastT -= dt;
+  if (G.aduShield > 0) G.aduShield -= dt;
+  draw();
+  requestAnimationFrame(loop);
+}
+
+function boot(){
+  // 想复现某一张地图：在地址后面加 ?seed=12345
+  const m = /[?&]seed=(\d+)/.exec(location.search || '');
+  if (m) fixedSeed = (parseInt(m[1], 10) >>> 0);
+  newGame();
+  resize();
+  window.addEventListener('resize', resize);
+  bindInput();
+  requestAnimationFrame(loop);
+}
+
+/* 无头 / 自动化测试钩子 */
+window.__api = {
+  newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
+  spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
+  castSkill, openShop, closeShop, endGame, recycleValue,
+  setPaused, togglePause, pauseAction, canPause, BTN_PAUSE,
+  aiTick, aiEnlist, aiPlace, sendAttack, pickHeroChar, pickHeroCharAI, rollTile, aiRollTile, sendCharToRoad, sendTileToRoad, freeRoadSlots, enlistSide, moneyOf, addMoney,
+  HERO_CHAR_POOL0, drawPoolChar, takePoolChar, refillPool,
+  addHeroXp, heroXpNeed, heroMaxLv, heroXpGain, releaseQueue, dealFrom, HERO_XP,
+  ownPathSpeedMul, queueRank, headRemain, routeRemainTo, OWN_PATH_SPD_CAP, OWN_PATH_SPD_BASE,
+  partnersOf, aiCharSpot, aiJunkCharCell, aiEmptyLand, aiCharCount, aiCharWorth,
+  aiTilePlaceable, AI_HOLD_FREE, AI_MAX_CHARS,
+  unitCells, unitPos, unitW, boardCount, eachUnit, clearCells, findHeroSpan, isAnchor,
+  isAduCell, inspectAt, closeInspect, makeInspect, statAtkOf, rateOf, rangeOf, spdOf, cellStr, spdStr,
+  newUnit, fuseUnit, toUnitObject,
+  autoFormHeroes, handSlotAt, handIndexAt, boardCellAt, toLogical, onDown, onMove, onUp,
+  ensureMyBuffs, ensureBuffs, nearestDefender, nearestMyUnit, nearestAiUnit, killDefender, killMyUnit, hitAdu, startWave,
+  sideInfo, castHeroSkill, atkMulOf, defMulOf, foeOf, colorOf,
+  damageMarcher, killMarcher, strikeMarcher, strikeDefender, marchForward, raiderRoute, forwardRoute,
+  HEROES, UNITS, FUSE, TIER, MAX_TIER,
+  isPathCell, isRoad, pathList, pathCells, pathPoints, spawnPos, pathAway, cellScore,
+  genMap, rollPath, quadOK, applyMap, computeFreeLand,
+  aiLandOK, START_OPEN, spawnGapOf, WAVE_GAP, WAVE_EARLY_MIN, waveClearedFor,
+  updateMarchers, updateMyUnits, updateAiUnits, updateSideUnits, updateFx, unitTarget, unitDmg, marchersOf, nearestMarcher,
+  get G(){ return G; },
+  CFG: { W, H, COLS, ROWS, CELL, HAND_N, Y_ENEMY, Y_MINE, BX,
+         // 地图每局重掷，这里用 getter 保证读到的是当前这张
+         get PATH_M(){ return PATH_M; }, get PATH_E(){ return PATH_E; },
+         get ADU_M_C(){ return ADU_M_C; }, get ADU_E_C(){ return ADU_E_C; },
+         get ADU_E_CELL(){ return ADU_E_CELL; }, get ADU_M_CELL(){ return ADU_M_CELL; },
+         get ADU_E(){ return ADU_E; }, get ADU_M(){ return ADU_M; },
+         get seed(){ return fixedSeed; },
+         ADU_R, MID1, MID2, BLOCK_R, DUEL_R, MARCH_SCALE, AI_TICK, START_OPEN, WAVE_GAP, WAVE_EARLY_MIN, MOVE_MUL, SHOVEL_RATE,
+         MY_HP_MUL, MY_DEF_MUL, MY_REGEN_IDLE, MY_REGEN_PCT, ATK_MOVE_MUL,
+         HAND_Y, HAND_S, HAND_X0, HAND_GAP, BTN_PAUSE, get SCALE(){ return SCALE; } },
+};
+boot();
+window.__G = G;
+
+})();
+</script>
+</body>
+</html>
