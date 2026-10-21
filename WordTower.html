@@ -2490,14 +2490,10 @@ function drawBoardBase(baseY, board, isEnemy){
     for (let c = 0; c < COLS; c++){
       const idx = c + r*COLS;
       const x = BX + c*CELL, y = baseY + r*CELL;
-      // 主公那一格
+      // 主公那一格：只铺一层淡底，边框交给 drawAdu 里的那枚印
       if (isAduCell(idx, mine)){
-        ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.10)' : 'rgba(184,134,11,0.14)';
+        ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.055)' : 'rgba(184,134,11,0.075)';
         rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
-        ctx.strokeStyle = isEnemy ? 'rgba(176,58,46,0.44)' : 'rgba(184,134,11,0.52)';
-        ctx.lineWidth = 2; ctx.setLineDash([7,5]);
-        rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.stroke();
-        ctx.setLineDash([]);
         continue;
       }
       if (isPathCell(idx, mine)){
@@ -3378,57 +3374,60 @@ function drawMarchers(v, foeHalf){
     ctx.restore();
   }
 }
-/* 主公现在是棋盘上的一格：格子里画一个主公，签与命数都收在这格里 */
+/* 主公那一格：一枚「印」——
+   圆牌 + 竖排两个字挤在 72px 的格子里实在不好看（字顶到边、签压在圆上、红心又咬住圆底）。
+   改成方印：双线印边 + 一个「主」字 + 底沿三颗命数心，居中留白，远看是一枚压在盘上的印章。 */
 function drawAdu(pos, life, max, mine){
-  const { x, y, r } = pos;
+  const { x, y } = pos;
   const danger = life <= 1;
-  const cellTop = y - CELL/2;
-  const cellLeft = x - CELL/2;
+  const c = mine ? GOLD : SEAL;
+  const S = CELL - 10;                 // 62
+  const L = x - S/2, T = y - S/2;
+
+  // 我方：一圈虚线护罩，和守军的「脱战回血」框区分开（这里更淡、更大）
   if (mine){
-    // 保护光环
-    ctx.strokeStyle = 'rgba(184,134,11,0.26)'; ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(184,134,11,0.20)'; ctx.lineWidth = 2;
     ctx.setLineDash([5,7]);
-    ctx.beginPath(); ctx.arc(x, y, r + 12, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(x, y, CELL*0.47, 0, Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
   }
-  ctx.fillStyle = 'rgba(70,60,45,0.16)';
-  ctx.beginPath(); ctx.arc(x, y+2, r, 0, Math.PI*2); ctx.fill();
-  const g = ctx.createRadialGradient(x, y-r*0.3, 4, x, y, r);
-  if (mine){ g.addColorStop(0,'#fdf6e3'); g.addColorStop(1,'#f0dfb8'); }
-  else { g.addColorStop(0,'#fbeceb'); g.addColorStop(1,'#f0d5d2'); }
+
+  // 印底
+  ctx.fillStyle = 'rgba(70,60,45,0.14)';
+  rr(ctx, L + 1, T + 3, S, S, 13); ctx.fill();
+  const g = ctx.createLinearGradient(0, T, 0, T + S);
+  if (mine){ g.addColorStop(0, '#fdf8ea'); g.addColorStop(1, '#f1e2bd'); }
+  else     { g.addColorStop(0, '#fceeed'); g.addColorStop(1, '#f2d8d4'); }
   ctx.fillStyle = g;
-  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
-  ctx.strokeStyle = mine ? GOLD : SEAL; ctx.lineWidth = 2.5; ctx.stroke();
-  // 主公：「主公」两个字竖排在圆里，和名将卡的竖排字一个排法
+  rr(ctx, L, T, S, S, 13); ctx.fill();
+  // 外印边 + 内细线（双线才像印，不像普通的格子）
+  ctx.strokeStyle = c; ctx.lineWidth = 2.4;
+  rr(ctx, L, T, S, S, 13); ctx.stroke();
+  ctx.strokeStyle = mine ? 'rgba(184,134,11,0.34)' : 'rgba(176,58,46,0.30)';
+  ctx.lineWidth = 1;
+  rr(ctx, L + 5.5, T + 5.5, S - 11, S - 11, 9); ctx.stroke();
+
+  // 字：一个「主」，略偏上，给底下的心留位
   ctx.fillStyle = mine ? '#8a5a06' : SEAL;
-  const afs = Math.round(r * 0.92);
-  ctx.font = 'bold ' + afs + 'px ' + FONT;
+  ctx.font = 'bold ' + Math.round(S*0.50) + 'px ' + FONT;
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('主', x, y - afs*0.52);
-  ctx.fillText('公', x, y + afs*0.52);
+  ctx.fillText('主', x, y - 6);
 
-  // 阵营小签：贴在格子左上角
-  ctx.fillStyle = mine ? GOLD : SEAL;
-  rr(ctx, cellLeft + 5, cellTop + 5, 34, 16, 5); ctx.fill();
-  ctx.fillStyle = '#fff8ec'; ctx.font = 'bold 11px ' + FONT;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(mine ? '我方' : '敌方', cellLeft + 22, cellTop + 14);
-
-  // 命数红心：排在格子底部
+  // 命数心：压在印底，一颗一颗排整齐
   const n = Math.max(max, life);
-  const gap = 13, w0 = (n-1)*gap;
-  const hy = cellTop + CELL - 12;
+  const gap = 15, w0 = (n-1)*gap;
+  const hy = T + S - 13;
   for (let i = 0; i < n; i++){
     const hx = x - w0/2 + i*gap;
     const on = i < life;
     ctx.save();
-    ctx.translate(hx, hy); ctx.scale(0.72, 0.72);
+    ctx.translate(hx, hy); ctx.scale(0.66, 0.66);
     ctx.beginPath();
     ctx.moveTo(0, 4);
     ctx.bezierCurveTo(-8, -3, -3, -10, 0, -5.5);
     ctx.bezierCurveTo(3, -10, 8, -3, 0, 4);
     ctx.closePath();
-    ctx.fillStyle = on ? (danger ? '#d8342a' : SEAL) : 'rgba(120,105,80,0.20)';
+    ctx.fillStyle = on ? (danger ? '#d8342a' : SEAL) : 'rgba(120,105,80,0.18)';
     ctx.fill();
     if (on && danger){
       ctx.globalAlpha = 0.35 + 0.35*Math.sin(G.t*8);
