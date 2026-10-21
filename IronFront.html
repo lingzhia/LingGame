@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>IronFront · 钢铁前线</title>
+<style>
+  /* UI 全部用 HTML 叠在画布上：按钮点击、悬停、禁用态都不用自己写命中检测。 */
+  html,body{margin:0;height:100%;overflow:hidden;background:#151a14;
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
+    color:#e9e5d8;user-select:none;-webkit-user-select:none}
+  #cv{position:absolute;inset:0;display:block;cursor:crosshair}
+  #top{position:absolute;top:0;left:0;right:0;height:42px;display:flex;align-items:center;gap:20px;
+    padding:0 16px;font-size:13px;font-variant-numeric:tabular-nums;
+    background:linear-gradient(180deg,rgba(24,30,23,.96),rgba(24,30,23,.82));
+    border-bottom:1px solid #37422f;backdrop-filter:blur(8px);pointer-events:none}
+  #top .k{color:#8b9a7e;margin-right:5px}
+  #top b{color:#ffd76a;font-weight:600}
+  #top .sp{flex:1}
+  #top .hint{color:#8b9a7e;font-size:12px}
+  #panel{position:absolute;left:14px;bottom:14px;width:222px;padding:10px;
+    background:rgba(24,30,23,.94);border:1px solid #37422f;border-radius:10px;
+    backdrop-filter:blur(8px);display:none}
+  #panel .ptitle{font-size:12px;color:#9fb08e;margin-bottom:8px;letter-spacing:.5px}
+  #panel .btns{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  #panel button{all:unset;box-sizing:border-box;padding:8px 9px;border-radius:7px;cursor:pointer;
+    background:#2b3527;border:1px solid #3d4a35;font-size:13px;line-height:1.25;
+    display:flex;flex-direction:column;gap:2px;transition:background .12s,border-color .12s}
+  #panel button:hover{background:#3a472f;border-color:#6d8a55}
+  #panel button i{font-style:normal;font-size:11px;color:#ffd76a}
+  #panel button.off{opacity:.38;cursor:not-allowed}
+  #panel button.off:hover{background:#2b3527;border-color:#3d4a35}
+  #mini{position:absolute;right:14px;bottom:14px;width:168px;height:168px;
+    border:1px solid #37422f;border-radius:8px;background:#11150f;display:block;cursor:pointer}
+  #tip{position:absolute;left:50%;top:64px;transform:translateX(-50%);
+    padding:8px 18px;border-radius:20px;background:rgba(24,30,23,.92);
+    border:1px solid #4b5a3d;font-size:13px;color:#dfe6d2;opacity:0;
+    transition:opacity .35s;pointer-events:none;white-space:nowrap}
+  #tip.on{opacity:1}
+  #end{position:absolute;inset:0;display:none;place-items:center;background:rgba(10,14,9,.72);
+    font-size:44px;letter-spacing:8px;font-weight:700;backdrop-filter:blur(3px)}
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+
+<div id="top">
+  <div><span class="k">资金</span><b id="ui-credits">0</b></div>
+  <div><span class="k">电力</span><b id="ui-power">0</b></div>
+  <div><span class="k">兵力</span><b id="ui-army">0</b></div>
+  <div class="sp"></div>
+  <div class="hint">左键框选 · 右键移动/攻击 · A 攻击移动 · WASD 平移 · 滚轮缩放 · Ctrl+数字编队</div>
+</div>
+
+<div id="panel"><div class="ptitle"></div><div class="btns"></div></div>
+<canvas id="mini"></canvas>
+<div id="tip"></div>
+<div id="end"></div>
+
+<script>
+(function(){
+'use strict';
+
+/* =========================================================================
+   0. 常量与数据表
+   —— RTS 的所有内容都写在「表」里。改数值就能改平衡，不用动逻辑。
+   ========================================================================= */
+const TILE = 32, MW = 72, MH = 72;
+const WW = MW * TILE, WH = MH * TILE;
+
+// 建筑表：w/h 以格为单位，time 是建造秒数，power 正数为发电、负数为耗电
+const BUILD = {
+  yard:     {name:'建造厂',   hp:1400, w:3, h:3, cost:0,   power:0,   time:0,  key:'Y'},
+  power:    {name:'电厂',     hp:520,  w:2, h:2, cost:100, power:+80, time:5,  key:'P'},
+  refinery: {name:'精炼厂',   hp:900,  w:3, h:2, cost:300, power:-30, time:9,  key:'R'},
+  barracks: {name:'兵营',     hp:620,  w:2, h:2, cost:200, power:-20, time:7,  key:'B'},
+  factory:  {name:'战车工厂', hp:1000, w:3, h:3, cost:500, power:-40, time:11, key:'F'},
+};
+
+// 单位表：range 为攻击距离，rof 为射击间隔（秒）
+const UNIT = {
+  inf:  {name:'步兵',   hp:75,  speed:62, range:112, dmg:9,  rof:.65, cost:60,  time:3, r:7,  cargo:0},
+  tank: {name:'坦克',   hp:310, speed:70, range:152, dmg:27, rof:1.5, cost:220, time:6, r:11, cargo:0},
+  harv: {name:'采矿车', hp:210, speed:60, range:0,   dmg:0,  rof:0,   cost:200, time:6, r:10, cargo:700},
+};
+
+const TEAM = [
+  {main:'#5d90d8', dark:'#2c5da0', light:'#b6d2f4'},   // 0 我方
+  {main:'#d0604f', dark:'#8f3125', light:'#f0b6a8'},   // 1 敌军
+];
+
+/* =========================================================================
+   1. 画布 / 相机
+   —— 世界坐标固定不变，屏幕坐标 = 世界坐标经过「平移 + 缩放」。
+      所有游戏逻辑只用世界坐标，所以缩放不影响手感。
+   ========================================================================= */
+const cv  = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const mini = document.getElementById('mini');
+const mctx = mini.getContext('2d');
+let VW = 0, VH = 0, DPR = 1;
+
+const cam = { x: 0, y: 0, z: 1 };
+const clamp = (v,a,b)=> v<a?a:v>b?b:v;
+
+function resize(){
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  VW = window.innerWidth; VH = window.innerHeight;
+  cv.width = VW*DPR; cv.height = VH*DPR;
+  cv.style.width = VW+'px'; cv.style.height = VH+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  mini.width = 168*DPR; mini.height = 168*DPR;
+  mini.style.width = '168px'; mini.style.height = '168px';
+  mctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize);
+
+const s2w = (sx,sy)=>({ x:(sx-VW/2)/cam.z + cam.x, y:(sy-VH/2)/cam.z + cam.y });
+const w2s = (wx,wy)=>({ x:(wx-cam.x)*cam.z + VW/2, y:(wy-cam.y)*cam.z + VH/2 });
+
+/* =========================================================================
+   2. 全局状态
+   —— RTS 的状态就是「一堆数 + 一堆实体」。渲染只是读这些数。
+   ========================================================================= */
+const S = {
+  t: 0,
+  credits: [4200, 3600],     // 每个阵营一个钱包
+  units: [],
+  buildings: [],
+  bullets: [],
+  fx: [],
+  sel: [],                   // 选中的单位
+  selBuilding: null,         // 选中的建筑（与 sel 互斥）
+  placing: null,             // 正在放置的建筑类型
+  attackMove: false,
+  groups: {},                // 编队 1-9
+  over: 0,                   // 0 进行中 1 胜利 -1 失败
+  paused: false,
+};
+
+const input = { mx:0, my:0, down:false, dragged:false, sx:0, sy:0, ex:0, ey:0,
+                pan:false, px:0, py:0, keys:{} };
+
+/* =========================================================================
+   3. 地形与矿脉
+   —— terrain 里存的是「这一格还有多少矿」，采矿车把它挖空。
+   ========================================================================= */
+const terrain = new Uint16Array(MW*MH);
+const shade   = new Float32Array(MW*MH);
+
+const at = (tx,ty)=> ty*MW + tx;
+const inMap = (tx,ty)=> tx>=0 && ty>=0 && tx<MW && ty<MH;
+const tileCenter = (tx,ty)=>({ x: tx*TILE + TILE/2, y: ty*TILE + TILE/2 });
+const oreAt = (t)=> t ? terrain[t] : 0;
+
+function oreCluster(ctx0, cy0, r, amt){
+  for(let ty=cy0-r; ty<=cy0+r; ty++){
+    for(let tx=ctx0-r; tx<=ctx0+r; tx++){
+      if(!inMap(tx,ty)) continue;
+      const d = Math.hypot(tx-ctx0, ty-cy0);
+      if(d > r + Math.random()*0.6) continue;
+      const i = at(tx,ty);
+      terrain[i] = Math.max(terrain[i], Math.round(amt * (1 - d/(r+1))));
+    }
+  }
+}
+
+function genWorld(){
+  for(let i=0;i<terrain.length;i++){ terrain[i]=0; shade[i]=Math.random(); }
+  // 双方基地附近各给一块「主矿」，再加几块中立矿，逼玩家扩张
+  oreCluster(7,56,3,1500);  oreCluster(13,60,2,1200);
+  oreCluster(63,14,3,1500); oreCluster(57,10,2,1200);
+  oreCluster(34,36,3,1800);
+  oreCluster(20,26,2,1300); oreCluster(50,44,2,1300);
+  oreCluster(10,24,2,1100); oreCluster(62,48,2,1100);
+}
+
+function findOre(x,y){
+  const tx0 = Math.floor(x/TILE), ty0 = Math.floor(y/TILE);
+  let best=null, bd=1e9;
+  for(let rad=0; rad<=26; rad++){
+    for(let ty=ty0-rad; ty<=ty0+rad; ty++){
+      for(let tx=tx0-rad; tx<=tx0+rad; tx++){
+        if(!inMap(tx,ty)) continue;
+        const i=at(tx,ty);
+        if(terrain[i] < 60) continue;
+        const d = (tx-tx0)*(tx-tx0)+(ty-ty0)*(ty-ty0);
+        if(d < bd){ bd=d; best=i; }
+      }
+    }
+    if(best!==null) return best;      // 由近到远扩圈，第一个找到的就是最近
+  }
+  return null;
+}
+
+/* =========================================================================
+   4. 实体创建
+   ========================================================================= */
+let uid = 1;
+
+function addBuilding(type, tx, ty, owner, done){
+  const d = BUILD[type];
+  const b = {
+    id: uid++, type, owner, x: tx*TILE, y: ty*TILE,
+    hp: done ? d.hp : d.hp*0.35, maxHp: d.hp,
+    buildT: done ? d.time : 0,
+    prod: null,            // {k, t} 生产队列（一次一个）
+    dead: false, isBuilding: true,
+  };
+  S.buildings.push(b);
+  return b;
+}
+
+function addUnit(type, x, y, owner){
+  const d = UNIT[type];
+  const u = {
+    id: uid++, type, owner, x, y, hp: d.hp, maxHp: d.hp,
+    dest: null, target: null, cd: 0, face: owner ? Math.PI : 0,
+    cargo: 0, state: 'idle', oreTile: null, acquire: false,
+    dead: false, isBuilding: false,
+  };
+  S.units.push(u);
+  return u;
+}
+
+const bRect = (b)=>{
+  const d = BUILD[b.type];
+  return { x: b.x - d.w*TILE/2, y: b.y - d.h*TILE/2, w: d.w*TILE, h: d.h*TILE };
+};
+
+function rectOverlap(a,b){
+  return a.x < b.x+b.w && b.x < a.x+a.w && a.y < b.y+b.h && b.y < a.y+a.h;
+}
+
+function centerOf(e){ return e.isBuilding ? {x:e.x, y:e.y} : {x:e.x, y:e.y}; }
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function distToBuilding(e,b){
+  const r = bRect(b);
+  const cx = clamp(e.x, r.x, r.x+r.w), cy = clamp(e.y, r.y, r.y+r.h);
+  return Math.hypot(e.x-cx, e.y-cy);
+}
+
+/* =========================================================================
+   5. 命令层
+   —— 玩家输入不直接改单位状态，而是「下命令」，单位自己去执行。
+      这是 RTS 与动作游戏最大的结构差别，也是后面能挂 AI 的原因：
+      AI 用的就是同一套命令函数。
+   ========================================================================= */
+function orderMove(units, wx, wy, spread){
+  // 编队散开：按格子给每个单位一个偏移点，避免全部挤在一个点上
+  const n = units.length;
+  const cols = Math.ceil(Math.sqrt(n));
+  const gap = 30;
+  units.forEach((u,i)=>{
+    const cx = i % cols, cy = Math.floor(i/cols);
+    const ox = (cx - (cols-1)/2) * gap;
+    const oy = (cy - Math.ceil(n/cols)/2) * gap;
+    u.dest = { x: wx+ox, y: wy+oy };
+    u.target = null;
+    u.acquire = !!spread;
+  });
+  S.fx.push({ kind:'mark', x:wx, y:wy, t:0, life:.6, color: units[0].owner?TEAM[1].main:TEAM[0].main });
+}
+
+function orderAttack(units, target){
+  units.forEach(u=>{
+    if(u.type==='harv') return;
+    u.target = target; u.dest = null; u.acquire = true;
+  });
+}
+
+function orderHarvest(units, tileIdx){
+  units.forEach(u=>{
+    if(u.type!=='harv') return;
+    u.oreTile = tileIdx; u.state = 'toOre'; u.dest = null; u.target = null;
+  });
+}
+
+/* =========================================================================
+   6. 模拟：单位
+   ========================================================================= */
+function moveToward(u, tx, ty, dt){
+  const dx = tx-u.x, dy = ty-u.y;
+  const d = Math.hypot(dx,dy);
+  if(d < 2) return true;
+  const sp = UNIT[u.type].speed;
+  const step = Math.min(d, sp*dt) / d;
+  u.x += dx*step; u.y += dy*step;
+  u.face = Math.atan2(dy,dx);
+  return d < 6;
+}
+
+function findEnemyNear(x,y,owner,radius, preferBuilding){
+  let best=null, bd=radius*radius;
+  for(const e of S.units){
+    if(e.dead || e.owner===owner) continue;
+    const d=(e.x-x)**2+(e.y-y)**2;
+    if(d<bd){ bd=d; best=e; }
+  }
+  if(best) return best;
+  for(const b of S.buildings){
+    if(b.dead || b.owner===owner) continue;
+    const d=(b.x-x)**2+(b.y-y)**2;
+    if(d<bd){ bd=d; best=b; }
+  }
+  return best;
+}
+
+function fire(u, target){
+  const U = UNIT[u.type];
+  S.bullets.push({
+    x:u.x, y:u.y, target, dmg:U.dmg, owner:u.owner,
+    speed: u.type==='tank'?820:1200, dead:false,
+  });
+  S.fx.push({ kind:'flash', x:u.x+Math.cos(u.face)*12, y:u.y+Math.sin(u.face)*12, t:0, life:.09 });
+}
+
+function updateCombatUnit(u, dt){
+  const U = UNIT[u.type];
+  if(u.cd > 0) u.cd -= dt;
+  if(u.target && u.target.dead) u.target = null;
+
+  /* 自动索敌：只在「空闲」或「攻击移动」时发生。
+     普通移动不索敌，否则你想撤兵时部队会一路被拽回去打。 */
+  if(!u.target && (u.acquire || !u.dest)){
+    const e = findEnemyNear(u.x, u.y, u.owner, U.range + 70);
+    if(e) u.target = e;
+    else if(u.acquire && !u.dest) u.acquire = false;
+  }
+
+  if(u.target){
+    const t = u.target;
+    const d = t.isBuilding ? distToBuilding(u, t) : dist(u, t);
+    if(d <= U.range){
+      u.dest = null;
+      u.face = Math.atan2(t.y-u.y, t.x-u.x);
+      if(u.cd <= 0){ fire(u, t); u.cd = U.rof; }
+    } else {
+      moveToward(u, t.x, t.y, dt);
+    }
+    return;
+  }
+
+  if(u.dest){
+    if(moveToward(u, u.dest.x, u.dest.y, dt)) u.dest = null;
+  }
+}
+
+/* 采矿车：作业三段式状态机 —— 找矿 → 采 → 回厂卸货。
+   经济系统的全部魔力就在这里：它把「时间」变成了「钱」。 */
+function updateHarvester(u, dt){
+  const U = UNIT.harv;
+  if(u.state === 'idle') u.state = u.cargo > 0 ? 'toRef' : 'toOre';
+
+  if(u.state === 'toOre'){
+    if(u.oreTile === null || terrain[u.oreTile] < 10) u.oreTile = findOre(u.x, u.y);
+    if(u.oreTile === null) return;                       // 没矿了，停着
+    const tx = u.oreTile % MW, ty = Math.floor(u.oreTile / MW);
+    const p = tileCenter(tx,ty);
+    if(moveToward(u, p.x, p.y, dt)) u.state = 'mine';
+    return;
+  }
+
+  if(u.state === 'mine'){
+    const i = u.oreTile;
+    if(i === null || terrain[i] < 1){ u.state='toOre'; u.oreTile=null; return; }
+    const take = Math.min(terrain[i], 340*dt, U.cargo - u.cargo);
+    terrain[i] = Math.max(0, terrain[i] - take);
+    u.cargo += take;
+    u.face += dt*2;                                     // 挖矿时晃一下，给点反馈
+    if(u.cargo >= U.cargo - 1) u.state = 'toRef';
+    return;
+  }
+
+  if(u.state === 'toRef'){
+    const ref = nearestOwn(u.x, u.y, u.owner, 'refinery', true);
+    if(!ref){ u.state='idle'; return; }
+    const p = { x:ref.x, y:ref.y };
+    if(moveToward(u, p.x, p.y, dt)){
+      S.credits[u.owner] += Math.round(u.cargo);
+      S.fx.push({ kind:'credits', x:u.x, y:u.y, t:0, life:1.1, val:Math.round(u.cargo) });
+      u.cargo = 0;
+      u.state = 'toOre'; u.oreTile = null;
+    }
+  }
+}
+
+function nearestOwn(x,y,owner,type,onlyDone){
+  let best=null, bd=1e18;
+  for(const b of S.buildings){
+    if(b.dead || b.owner!==owner) continue;
+    if(type && b.type!==type) continue;
+    if(onlyDone && b.buildT < BUILD[b.type].time) continue;
+    const d=(b.x-x)**2+(b.y-y)**2;
+    if(d<bd){ bd=d; best=b; }
+  }
+  return best;
+}
+
+/* =========================================================================
+   7. 模拟：建筑（建造进度 + 生产）
+   ========================================================================= */
+function updateBuilding(b, dt){
+  if(b.dead) return;
+  const d = BUILD[b.type];
+
+  if(b.buildT < d.time){                       // 还没盖完：进度条往上爬
+    const ok = powerRatio(b.owner) >= 1 ? 1 : 0.55;   // 缺电则拖慢
+    b.buildT = Math.min(d.time, b.buildT + dt*ok);
+    return;
+  }
+  if(b.buildT === d.time && b._justDone !== true){    // 完工瞬间的副作用
+    b._justDone = true;
+    if(b.type === 'refinery'){                         // 精炼厂送一台采矿车
+      const r = bRect(b);
+      addUnit('harv', b.x, r.y + r.h + 18, b.owner);
+    }
+  }
+
+  if(b.prod){
+    b.prod.t += dt;
+    if(b.prod.t >= UNIT[b.prod.k].time){                // 造好了 → 从建筑边缘出兵
+      const r = bRect(b);
+      const u = addUnit(b.prod.k, b.x, r.y + r.h + 16, b.owner);
+      const dir = b.owner === 0 ? 1 : -1;
+      u.dest = { x: b.x + (Math.random()-.5)*50, y: b.y + dir*(r.h/2 + 60) };
+      S.fx.push({ kind:'ring', x:u.x, y:u.y, t:0, life:.5, color:TEAM[b.owner].light });
+      b.prod = null;
+    }
+  }
+}
+
+function queueProd(b, key){
+  if(!b || b.owner !== 0) return;
+  if(b.buildT < BUILD[b.type].time) return;
+  if(b.prod){ message('生产队列已满（一次只能造一个）'); return; }
+  const c = UNIT[key].cost;
+  if(S.credits[0] < c){ message('资金不足'); return; }
+  S.credits[0] -= c;
+  b.prod = { k:key, t:0 };
+}
+
+function powerRatio(owner){
+  let gen = 0, use = 0;
+  for(const b of S.buildings){
+    if(b.dead || b.owner !== owner) continue;
+    if(b.buildT < BUILD[b.type].time) continue;
+    const p = BUILD[b.type].power;
+    if(p > 0) gen += p; else use -= p;
+  }
+  if(use === 0) return 2;
+  return gen / use;
+}
+
+/* =========================================================================
+   8. 模拟：子弹 / 特效
+   ========================================================================= */
+function updateBullets(dt){
+  for(const b of S.bullets){
+    if(b.dead) continue;
+    const t = b.target;
+    if(!t || t.dead){ b.dead = true; continue; }
+    const tx = t.x, ty = t.y;
+    const dx = tx-b.x, dy = ty-b.y;
+    const d = Math.hypot(dx,dy);
+    const step = b.speed*dt;
+    if(d <= step + 6){                                   // 命中
+      damage(t, b.dmg);
+      b.dead = true;
+      S.fx.push({ kind:'hit', x:tx, y:ty, t:0, life:.22 });
+      continue;
+    }
+    b.x += dx/d*step; b.y += dy/d*step;
+  }
+  S.bullets = S.bullets.filter(b=>!b.dead);
+}
+
+function damage(e, dmg){
+  if(e.dead) return;
+  e.hp -= dmg;
+  if(e.hp <= 0){
+    e.dead = true;
+    const big = e.isBuilding;
+    S.fx.push({ kind:'boom', x:e.x, y:e.y, t:0, life: big? .9 : .45,
+                r: big? 70 : 22, color:'#ffb25e' });
+    if(big){
+      for(let i=0;i<3;i++)
+        S.fx.push({ kind:'boom', x:e.x+(Math.random()-.5)*40, y:e.y+(Math.random()-.5)*40,
+                    t:0, life:.5, r:26, color:'#ff7a3a' });
+    }
+  }
+}
+
+function updateFx(dt){
+  for(const f of S.fx) f.t += dt;
+  S.fx = S.fx.filter(f=> f.t < f.life);
+}
+
+/* =========================================================================
+   9. 碰撞：单位互相挤开 + 不被建筑吃进去
+   —— 这是「手感」的一部分。没有它，部队会叠成一个点。
+   ========================================================================= */
+function resolveCollisions(){
+  const us = S.units;
+  for(let i=0;i<us.length;i++){
+    const a = us[i];
+    if(a.dead) continue;
+    const ra = UNIT[a.type].r;
+
+    for(const b of S.buildings){
+      if(b.dead) continue;
+      const r = bRect(b);
+      const cx = clamp(a.x, r.x, r.x+r.w), cy = clamp(a.y, r.y, r.y+r.h);
+      let dx = a.x-cx, dy = a.y-cy;
+      let d = Math.hypot(dx,dy);
+      if(d < ra){
+        if(d < 0.001){ dx = 0; dy = -1; d = 1; }
+        a.x = cx + dx/d*ra; a.y = cy + dy/d*ra;
+      }
+    }
+
+    for(let j=i+1;j<us.length;j++){
+      const c = us[j];
+      if(c.dead) continue;
+      const rr = ra + UNIT[c.type].r;
+      const dx = c.x-a.x, dy = c.y-a.y;
+      const d2 = dx*dx+dy*dy;
+      if(d2 < rr*rr && d2 > 0.0001){
+        const d = Math.sqrt(d2);
+        const push = (rr-d)*0.5;
+        const nx = dx/d, ny = dy/d;
+        a.x -= nx*push; a.y -= ny*push;
+        c.x += nx*push; c.y += ny*push;
+      }
+    }
+    a.x = clamp(a.x, 4, WW-4); a.y = clamp(a.y, 4, WH-4);
+  }
+}
+
+/* =========================================================================
+   10. AI 对手
+   —— 只做三件事：补采矿车、按优先级造兵、攒够人就来一波。
+      别指望它聪明，但它能逼你把经济跑起来。
+   ========================================================================= */
+const ai = { tick: 0, nextWave: 80, waveGap: 62 };
+
+function updateAI(dt){
+  ai.tick += dt;
+  if(ai.tick < 1.2) return;
+  ai.tick = 0;
+
+  const mine = (t)=> S.buildings.filter(b=>b.owner===1 && b.type===t && !b.dead && b.buildT>=BUILD[t].time)[0];
+  const units = S.units.filter(u=>u.owner===1 && !u.dead);
+  const refs = S.buildings.filter(b=>b.owner===1 && b.type==='refinery' && !b.dead).length;
+  const harvs = units.filter(u=>u.type==='harv').length;
+  const army = units.filter(u=>u.type!=='harv');
+  const C = S.credits[1];
+
+  const fac = mine('factory'), bar = mine('barracks');
+
+  // 1) 经济：精炼厂数量决定该有几台车
+  if(fac && !fac.prod && harvs < Math.max(2, refs+1) && C >= UNIT.harv.cost){
+    S.credits[1] -= UNIT.harv.cost; fac.prod = {k:'harv', t:0};
+  }
+  // 2) 兵力：步兵优先，坦克有钱就造，总兵力上限 14
+  else if(army.length < 14){
+    if(bar && !bar.prod && C >= UNIT.inf.cost && Math.random()<0.55){
+      S.credits[1] -= UNIT.inf.cost; bar.prod = {k:'inf', t:0};
+    } else if(fac && !fac.prod && C >= UNIT.tank.cost + 120){
+      S.credits[1] -= UNIT.tank.cost; fac.prod = {k:'tank', t:0};
+    }
+  }
+
+  // 3) 进攻：攒够 5 个战斗单位，全体扑向我方最近的建筑
+  if(S.t > ai.nextWave && army.length >= 5){
+    const targets = S.buildings.filter(b=>b.owner===0 && !b.dead);
+    if(targets.length){
+      const t0 = targets[0];
+      for(const u of army){
+        u.acquire = true;
+        u.target = null;
+        u.dest = { x: t0.x + (Math.random()-.5)*120, y: t0.y + (Math.random()-.5)*120 };
+      }
+      ai.nextWave = S.t + ai.waveGap;
+      message('敌军出击！');
+    }
+  }
+}
+
+/* =========================================================================
+   11. 渲染
+   ========================================================================= */
+function render(){
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.fillStyle = '#151a14';
+  ctx.fillRect(0,0,VW,VH);
+
+  drawTerrain();
+  drawBuildingRings();
+  drawMarks();
+  for(const b of S.buildings) if(!b.dead) drawBuilding(b);
+  for(const u of S.units) if(!u.dead) drawUnit(u);
+  drawBullets();
+  drawFx();
+  if(input.down && input.dragged) drawSelectBox();
+  if(S.placing) drawGhost();
+
+  drawMinimap();
+}
+
+function drawTerrain(){
+  const x0 = Math.max(0, Math.floor((cam.x - VW/2/cam.z)/TILE) - 1);
+  const y0 = Math.max(0, Math.floor((cam.y - VH/2/cam.z)/TILE) - 1);
+  const x1 = Math.min(MW-1, Math.ceil((cam.x + VW/2/cam.z)/TILE) + 1);
+  const y1 = Math.min(MH-1, Math.ceil((cam.y + VH/2/cam.z)/TILE) + 1);
+
+  for(let ty=y0; ty<=y1; ty++){
+    for(let tx=x0; tx<=x1; tx++){
+      const i = at(tx,ty);
+      const p = w2s(tx*TILE, ty*TILE);
+      const w = TILE*cam.z + 0.6, h = TILE*cam.z + 0.6;
+      const sh = shade[i];
+      // 草地：两种基色 + 每格微小明暗，避免大面积死板
+      const g = 92 + Math.round(sh*14);
+      ctx.fillStyle = `rgb(${g-34},${g},${Math.round(g*0.62)})`;
+      ctx.fillRect(p.x, p.y, w, h);
+
+      if(terrain[i] > 0){
+        // 矿：金色碎块，数量随剩余量变化
+        const amt = terrain[i]/1600;
+        ctx.fillStyle = `rgba(226,178,74,${0.25 + amt*0.5})`;
+        const n = 3 + Math.round(amt*4);
+        for(let k=0;k<n;k++){
+          const r1 = ((i*31 + k*977) % 1000)/1000;
+          const r2 = ((i*57 + k*613) % 1000)/1000;
+          const s = (2.4 + r1*1.6)*cam.z;
+          ctx.fillRect(p.x + r1*TILE*cam.z*0.8 + 2, p.y + r2*TILE*cam.z*0.8 + 2, s, s);
+        }
+      }
+    }
+  }
+  // 淡网格，给玩家距离感
+  ctx.strokeStyle = 'rgba(0,0,0,.075)';
+  ctx.lineWidth = 1;
+  for(let tx=x0; tx<=x1+1; tx++){
+    const p = w2s(tx*TILE, 0);
+    ctx.beginPath(); ctx.moveTo(Math.round(p.x)+.5, 0); ctx.lineTo(Math.round(p.x)+.5, VH); ctx.stroke();
+  }
+  for(let ty=y0; ty<=y1+1; ty++){
+    const p = w2s(0, ty*TILE);
+    ctx.beginPath(); ctx.moveTo(0, Math.round(p.y)+.5); ctx.lineTo(VW, Math.round(p.y)+.5); ctx.stroke();
+  }
+}
+
+function drawBuildingRings(){
+  // 选中建筑：脚下画一圈阵营色
+  if(S.selBuilding && !S.selBuilding.dead){
+    const b = S.selBuilding, r = bRect(b);
+    const p = w2s(r.x, r.y);
+    ctx.strokeStyle = TEAM[b.owner].light;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([6,4]);
+    ctx.strokeRect(p.x, p.y, r.w*cam.z, r.h*cam.z);
+    ctx.setLineDash([]);
+  }
+  // 选中单位：绿色椭圆（红警的经典做法，比画方框好看）
+  for(const u of S.sel){
+    if(u.dead) continue;
+    const p = w2s(u.x, u.y);
+    ctx.strokeStyle = 'rgba(160,240,140,.85)';
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.ellipse(p.x, p.y + 2*cam.z, 11*cam.z, 5.5*cam.z, 0, 0, Math.PI*2);
+    ctx.stroke();
+  }
+}
+
+function drawBuilding(b){
+  const d = BUILD[b.type];
+  const r = bRect(b);
+  const p = w2s(r.x, r.y);
+  const w = r.w*cam.z, h = r.h*cam.z;
+  const T = TEAM[b.owner];
+  const building = b.buildT < d.time;
+  const prog = b.buildT / (d.time || 1);
+
+  ctx.save();
+  ctx.globalAlpha = building ? 0.45 + prog*0.55 : 1;
+
+  // 影子
+  ctx.fillStyle = 'rgba(0,0,0,.28)';
+  ctx.fillRect(p.x + 3*cam.z, p.y + 4*cam.z, w, h);
+
+  // 主体
+  ctx.fillStyle = b.owner ? '#5b4038' : '#3f4a55';
+  ctx.fillRect(p.x, p.y, w, h);
+  ctx.fillStyle = 'rgba(255,255,255,.10)';
+  ctx.fillRect(p.x, p.y, w, h*0.35);
+  // 阵营色带
+  ctx.fillStyle = T.main;
+  ctx.fillRect(p.x, p.y + h*0.35, w, Math.max(2, h*0.09));
+  // 边框
+  ctx.strokeStyle = T.dark;
+  ctx.lineWidth = Math.max(1, 2*cam.z);
+  ctx.strokeRect(p.x+.5, p.y+.5, w-1, h-1);
+
+  drawBuildingDetail(b, p.x, p.y, w, h);
+
+  // 建造中：斜纹 + 进度
+  if(building){
+    ctx.strokeStyle = 'rgba(255,255,255,.18)';
+    ctx.lineWidth = 1;
+    for(let i=-h; i<w; i+=10*cam.z){
+      ctx.beginPath();
+      ctx.moveTo(p.x+i, p.y+h); ctx.lineTo(p.x+i+h, p.y);
+      ctx.stroke();
+    }
+    ctx.fillStyle = 'rgba(0,0,0,.6)';
+    ctx.fillRect(p.x, p.y + h - 6*cam.z, w, 4*cam.z);
+    ctx.fillStyle = '#ffd76a';
+    ctx.fillRect(p.x, p.y + h - 6*cam.z, w*prog, 4*cam.z);
+  }
+  ctx.restore();
+
+  // 血条（只在掉血时出现，避免画面噪音）
+  if(b.hp < b.maxHp) drawBar(p.x, p.y - 8*cam.z, w, b.hp/b.maxHp, 4*cam.z);
+
+  // 生产进度
+  if(b.prod){
+    const t = b.prod.t / UNIT[b.prod.k].time;
+    drawBar(p.x, p.y + h + 3*cam.z, w, t, 3*cam.z, '#7fd3ff');
+  }
+}
+
+function drawBuildingDetail(b, x, y, w, h){
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,.22)';
+  ctx.lineWidth = Math.max(1, 1.5*cam.z);
+  if(b.type === 'yard'){
+    ctx.strokeRect(x + w*.2, y + h*.2, w*.6, h*.6);
+    ctx.beginPath();
+    ctx.moveTo(x + w*.2, y + h*.2); ctx.lineTo(x + w*.8, y + h*.8);
+    ctx.stroke();
+  } else if(b.type === 'refinery'){
+    ctx.fillStyle = 'rgba(255,255,255,.16)';
+    ctx.beginPath(); ctx.arc(x + w*.28, y + h*.62, Math.min(w,h)*.18, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(x + w*.68, y + h*.62, Math.min(w,h)*.18, 0, 7); ctx.fill();
+  } else if(b.type === 'barracks'){
+    ctx.strokeRect(x + w*.34, y + h*.5, w*.32, h*.42);
+    ctx.beginPath();
+    ctx.moveTo(x + w*.5, y + h*.18); ctx.lineTo(x + w*.5, y + h*.06);
+    ctx.stroke();
+  } else if(b.type === 'factory'){
+    ctx.beginPath();
+    ctx.arc(x + w*.5, y + h*.66, Math.min(w,h)*.2, Math.PI, 0);
+    ctx.stroke();
+  } else if(b.type === 'power'){
+    ctx.beginPath();
+    ctx.arc(x + w*.5, y + h*.55, Math.min(w,h)*.22, 0, 7);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(x + w*.5, y + h*.25); ctx.lineTo(x + w*.5, y + h*.1);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawBar(x,y,w,ratio,hh,color){
+  ctx.fillStyle = 'rgba(0,0,0,.62)';
+  ctx.fillRect(x, y, w, hh);
+  const c = color || (ratio>.5 ? '#7bd06a' : ratio>.25 ? '#f0c04a' : '#e05a4a');
+  ctx.fillStyle = c;
+  ctx.fillRect(x, y, w*clamp(ratio,0,1), hh);
+}
+
+function drawUnit(u){
+  const p = w2s(u.x, u.y);
+  const z = cam.z;
+  const T = TEAM[u.owner];
+  ctx.save();
+  ctx.translate(p.x, p.y);
+
+  if(u.type === 'tank'){
+    ctx.rotate(u.face);
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.fillRect(-11*z+2, -8*z+3, 22*z, 16*z);
+    ctx.fillStyle = u.owner ? '#63443a' : '#3d4a57';
+    ctx.fillRect(-11*z, -8*z, 22*z, 16*z);
+    ctx.fillStyle = T.main;
+    ctx.fillRect(-11*z, -3*z, 22*z, 6*z);
+    ctx.fillStyle = '#2a3138';
+    ctx.beginPath(); ctx.arc(0,0,6*z,0,7); ctx.fill();
+    ctx.fillStyle = T.light;
+    ctx.fillRect(4*z, -1.6*z, 13*z, 3.2*z);
+  } else if(u.type === 'harv'){
+    ctx.rotate(u.face);
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.fillRect(-10*z+2, -7*z+3, 20*z, 14*z);
+    ctx.fillStyle = '#8a7a4a';
+    ctx.fillRect(-10*z, -7*z, 20*z, 14*z);
+    const load = u.cargo / UNIT.harv.cargo;
+    if(load > 0.02){
+      ctx.fillStyle = '#e2b24a';
+      ctx.fillRect(-9*z, -6*z, 18*z*load, 12*z);
+    }
+    ctx.fillStyle = '#2b3226';
+    ctx.fillRect(5*z, -5*z, 5*z, 10*z);
+  } else {
+    ctx.rotate(u.face);
+    const bob = Math.sin(S.t*9 + u.id)*0.6*z;
+    ctx.fillStyle = 'rgba(0,0,0,.35)';
+    ctx.beginPath(); ctx.arc(1.5*z, 1.5*z + bob, 6*z, 0, 7); ctx.fill();
+    ctx.fillStyle = u.owner ? '#a8544a' : '#4a7bb0';
+    ctx.beginPath(); ctx.arc(0, bob, 6*z, 0, 7); ctx.fill();
+    ctx.fillStyle = T.light;
+    ctx.beginPath(); ctx.arc(1.5*z, bob, 2.6*z, 0, 7); ctx.fill();
+    ctx.fillStyle = '#222';
+    ctx.fillRect(4*z, bob-0.9*z, 9*z, 1.8*z);
+  }
+  ctx.restore();
+
+  if(u.hp < u.maxHp) drawBar(p.x - 10*z, p.y - 15*z, 20*z, u.hp/u.maxHp, 3*z);
+  if(u.type === 'harv' && u.cargo > 0){
+    ctx.fillStyle = 'rgba(255,215,106,.9)';
+    ctx.font = `${9*z}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(Math.round(u.cargo), p.x, p.y - 16*z);
+  }
+}
+
+function drawBullets(){
+  for(const b of S.bullets){
+    const p = w2s(b.x, b.y);
+    ctx.fillStyle = b.owner ? '#ffca8a' : '#ffe9a8';
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, Math.max(1.2, 2.2*cam.z), 0, 7);
+    ctx.fill();
+  }
+}
+
+function drawFx(){
+  for(const f of S.fx){
+    const k = f.t / f.life;
+    const p = w2s(f.x, f.y);
+    ctx.save();
+    ctx.globalAlpha = 1 - k;
+    if(f.kind === 'boom'){
+      const r = (f.r || 30) * cam.z * (0.4 + k*0.9);
+      const g = ctx.createRadialGradient(p.x,p.y,0,p.x,p.y,r);
+      g.addColorStop(0, 'rgba(255,240,180,.95)');
+      g.addColorStop(.4, f.color || 'rgba(255,150,60,.8)');
+      g.addColorStop(1, 'rgba(120,50,20,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(p.x,p.y,r,0,7); ctx.fill();
+    } else if(f.kind === 'hit'){
+      ctx.fillStyle = 'rgba(255,240,200,.9)';
+      ctx.beginPath(); ctx.arc(p.x,p.y, (3 + k*5)*cam.z, 0, 7); ctx.fill();
+    } else if(f.kind === 'flash'){
+      ctx.fillStyle = 'rgba(255,235,170,.95)';
+      ctx.beginPath(); ctx.arc(p.x,p.y, 4*cam.z, 0, 7); ctx.fill();
+    } else if(f.kind === 'mark'){
+      ctx.strokeStyle = f.color || '#9fe08a';
+      ctx.lineWidth = 2*cam.z;
+      ctx.beginPath(); ctx.arc(p.x,p.y,(6+k*16)*cam.z,0,7); ctx.stroke();
+    } else if(f.kind === 'ring'){
+      ctx.strokeStyle = f.color || '#fff';
+      ctx.lineWidth = 2*cam.z;
+      ctx.beginPath(); ctx.arc(p.x,p.y,(8+k*22)*cam.z,0,7); ctx.stroke();
+    } else if(f.kind === 'credits'){
+      ctx.fillStyle = '#ffd76a';
+      ctx.font = `bold ${12*cam.z}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.fillText('+'+f.val, p.x, p.y - (10+k*22)*cam.z);
+    }
+    ctx.restore();
+  }
+}
+
+function drawMarks(){
+  // 选中单位的移动目标点，画一条淡淡的虚线，方便判断部队在往哪走
+  if(!S.sel.length) return;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(180,230,160,.22)';
+  ctx.lineWidth = 1;
+  for(const u of S.sel){
+    if(!u.dest) continue;
+    const a = w2s(u.x,u.y), b = w2s(u.dest.x,u.dest.y);
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawSelectBox(){
+  const x = Math.min(input.sx, input.ex), y = Math.min(input.sy, input.ey);
+  const w = Math.abs(input.ex-input.sx), h = Math.abs(input.ey-input.sy);
+  ctx.fillStyle = 'rgba(140,220,120,.12)';
+  ctx.fillRect(x,y,w,h);
+  ctx.strokeStyle = 'rgba(170,240,150,.8)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(x+.5,y+.5,w,h);
+}
+
+function drawGhost(){
+  const d = BUILD[S.placing];
+  const w = d.w*TILE, h = d.h*TILE;
+  const wp = s2w(input.mx, input.my);
+  const gx = Math.round((wp.x - w/2)/TILE)*TILE + w/2;
+  const gy = Math.round((wp.y - h/2)/TILE)*TILE + h/2;
+  const ok = canPlace(S.placing, gx, gy);
+  const p = w2s(gx - w/2, gy - h/2);
+
+  ctx.save();
+  ctx.globalAlpha = .55;
+  ctx.fillStyle = ok ? '#7bd06a' : '#e05a4a';
+  ctx.fillRect(p.x, p.y, w*cam.z, h*cam.z);
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = ok ? '#bff5a8' : '#ff9a8a';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(p.x+.5, p.y+.5, w*cam.z-1, h*cam.z-1);
+  // 格子参考线
+  ctx.strokeStyle = 'rgba(255,255,255,.25)';
+  ctx.lineWidth = 1;
+  for(let i=1;i<d.w;i++){
+    const q = w2s(gx - w/2 + i*TILE, 0);
+    ctx.beginPath(); ctx.moveTo(q.x, p.y); ctx.lineTo(q.x, p.y + h*cam.z); ctx.stroke();
+  }
+  for(let i=1;i<d.h;i++){
+    const q = w2s(0, gy - h/2 + i*TILE);
+    ctx.beginPath(); ctx.moveTo(p.x, q.y); ctx.lineTo(p.x + w*cam.z, q.y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* 小地图：直接按世界比例压扁画，点一下跳转视角 */
+function drawMinimap(){
+  const W = 168, H = 168;
+  mctx.clearRect(0,0,W,H);
+  mctx.fillStyle = '#3a4a2c';
+  mctx.fillRect(0,0,W,H);
+
+  const sx = W/WW, sy = H/WH;
+  for(let ty=0; ty<MH; ty+=1){
+    for(let tx=0; tx<MW; tx+=1){
+      const i = at(tx,ty);
+      if(terrain[i] > 0){
+        mctx.fillStyle = 'rgba(226,178,74,.85)';
+        mctx.fillRect(tx*TILE*sx, ty*TILE*sy, TILE*sx+0.8, TILE*sy+0.8);
+      }
+    }
+  }
+  for(const b of S.buildings){
+    if(b.dead) continue;
+    mctx.fillStyle = TEAM[b.owner].main;
+    mctx.fillRect(b.x*sx-2, b.y*sy-2, 4, 4);
+  }
+  for(const u of S.units){
+    if(u.dead) continue;
+    mctx.fillStyle = TEAM[u.owner].light;
+    mctx.fillRect(u.x*sx-1, u.y*sy-1, 2, 2);
+  }
+  // 视野框
+  const vw = VW/cam.z*sx, vh = VH/cam.z*sy;
+  mctx.strokeStyle = 'rgba(255,255,255,.85)';
+  mctx.lineWidth = 1;
+  mctx.strokeRect(cam.x*sx - vw/2, cam.y*sy - vh/2, vw, vh);
+}
+
+/* =========================================================================
+   12. 建造放置
+   ========================================================================= */
+function canPlace(type, cx, cy){
+  const d = BUILD[type];
+  const w = d.w*TILE, h = d.h*TILE;
+  const r = { x:cx-w/2, y:cy-h/2, w, h };
+  if(r.x < 0 || r.y < 0 || r.x+r.w > WW || r.y+r.h > WH) return false;
+
+  for(const b of S.buildings){
+    if(!b.dead && rectOverlap(r, bRect(b))) return false;
+  }
+  // 不能压矿
+  const tx0 = Math.floor(r.x/TILE), ty0 = Math.floor(r.y/TILE);
+  const tx1 = Math.ceil((r.x+r.w)/TILE)-1, ty1 = Math.ceil((r.y+r.h)/TILE)-1;
+  for(let ty=ty0; ty<=ty1; ty++)
+    for(let tx=tx0; tx<=tx1; tx++)
+      if(inMap(tx,ty) && terrain[at(tx,ty)] > 40) return false;
+
+  // 必须挨着己方建筑（9 格内），防止在地图任意角落起楼
+  let near = false;
+  for(const b of S.buildings){
+    if(b.dead || b.owner!==0) continue;
+    const br = bRect(b);
+    const bx = clamp(cx, br.x, br.x+br.w), by = clamp(cy, br.y, br.y+br.h);
+    if(Math.hypot(cx-bx, cy-by) < TILE*9){ near = true; break; }
+  }
+  return near;
+}
+
+function tryPlace(){
+  const type = S.placing;
+  const d = BUILD[type];
+  const wp = s2w(input.mx, input.my);
+  const w = d.w*TILE, h = d.h*TILE;
+  const gx = Math.round((wp.x - w/2)/TILE)*TILE + w/2;
+  const gy = Math.round((wp.y - h/2)/TILE)*TILE + h/2;
+
+  if(!canPlace(type, gx, gy)){ message('这里放不下'); return; }
+  if(S.credits[0] < d.cost){ message('资金不足'); return; }
+
+  S.credits[0] -= d.cost;
+  addBuilding(type, gx/TILE, gy/TILE, 0, false);
+  S.placing = null;
+  cv.style.cursor = 'crosshair';
+  refreshPanel();
+}
+
+/* =========================================================================
+   13. 输入
+   ========================================================================= */
+function pickAt(wx, wy){
+  // 建筑优先（体积大，好点）
+  for(let i=S.buildings.length-1; i>=0; i--){
+    const b = S.buildings[i];
+    if(b.dead) continue;
+    const r = bRect(b);
+    if(wx>=r.x && wx<=r.x+r.w && wy>=r.y && wy<=r.y+r.h) return b;
+  }
+  let best=null, bd=1e9;
+  for(const u of S.units){
+    if(u.dead) continue;
+    const d = Math.hypot(u.x-wx, u.y-wy);
+    if(d < UNIT[u.type].r + 8 && d < bd){ bd=d; best=u; }
+  }
+  return best;
+}
+
+function selectedCombat(){
+  return S.sel.filter(u=>u.type!=='harv' && !u.dead);
+}
+
+cv.addEventListener('mousedown', e=>{
+  if(e.button === 0){
+    if(S.placing){ tryPlace(); return; }
+    input.sx = input.ex = e.clientX;
+    input.sy = input.ey = e.clientY;
+    input.down = true; input.dragged = false;
+  } else if(e.button === 1){
+    e.preventDefault();
+    input.pan = true; input.px = e.clientX; input.py = e.clientY;
+  }
+});
+
+cv.addEventListener('mousemove', e=>{
+  input.mx = e.clientX; input.my = e.clientY;
+  if(input.pan){
+    cam.x -= (e.clientX - input.px)/cam.z;
+    cam.y -= (e.clientY - input.py)/cam.z;
+    input.px = e.clientX; input.py = e.clientY;
+    clampCam();
+  }
+  if(input.down){
+    input.ex = e.clientX; input.ey = e.clientY;
+    if(Math.abs(input.ex-input.sx) > 5 || Math.abs(input.ey-input.sy) > 5) input.dragged = true;
+  }
+});
+
+window.addEventListener('mouseup', e=>{
+  if(e.button === 1) input.pan = false;
+  if(e.button !== 0) return;
+  if(!input.down) return;
+  input.down = false;
+
+  const wx = s2w(input.mx, input.my).x, wy = s2w(input.mx, input.my).y;
+
+  if(input.dragged){
+    boxSelect(input.sx, input.sy, input.ex, input.ey, e.shiftKey);
+  } else {
+    const hit = pickAt(wx, wy);
+    if(S.attackMove && S.sel.length){
+      S.attackMove = false;
+      cv.style.cursor = 'crosshair';
+      orderMove(selectedCombat().length ? selectedCombat() : S.sel, wx, wy, true);
+      return;
+    }
+    if(hit && !hit.isBuilding){
+      if(e.shiftKey && hit.owner === 0){
+        if(!S.sel.includes(hit)) S.sel.push(hit);
+      } else if(hit.owner === 0){
+        S.sel = [hit]; S.selBuilding = null;
+      } else {
+        S.sel = []; S.selBuilding = null;
+      }
+    } else if(hit){
+      S.sel = []; S.selBuilding = hit;
+    } else {
+      S.sel = []; S.selBuilding = null;
+    }
+    refreshPanel();
+  }
+});
+
+cv.addEventListener('contextmenu', e=>{
+  e.preventDefault();
+  if(S.placing){ S.placing = null; cv.style.cursor='crosshair'; refreshPanel(); return; }
+  if(!S.sel.length) return;
+
+  const wp = s2w(e.clientX, e.clientY);
+  const hit = pickAt(wp.x, wp.y);
+
+  if(hit && hit.owner !== 0){
+    const combat = selectedCombat();
+    if(combat.length) orderAttack(combat, hit);
+    else orderMove(S.sel, wp.x, wp.y, false);
+    S.fx.push({ kind:'mark', x: hit.x, y: hit.y, t:0, life:.5, color:'#ff8a6a' });
+    return;
+  }
+  if(hit && hit.isBuilding && hit.type === 'refinery' && hit.owner === 0){
+    // 右键自己的精炼厂 = 采矿车回家卸货
+    const harvs = S.sel.filter(u=>u.type==='harv');
+    if(harvs.length){ harvs.forEach(u=>u.state = u.cargo>0 ? 'toRef':'toOre'); return; }
+  }
+  orderMove(S.sel, wp.x, wp.y, false);
+});
+
+cv.addEventListener('wheel', e=>{
+  e.preventDefault();
+  const before = s2w(e.clientX, e.clientY);
+  cam.z = clamp(cam.z * (e.deltaY > 0 ? 0.88 : 1.14), 0.42, 1.8);
+  const after = s2w(e.clientX, e.clientY);
+  cam.x += before.x - after.x;
+  cam.y += before.y - after.y;
+  clampCam();
+}, { passive:false });
+
+function boxSelect(x1,y1,x2,y2,additive){
+  const ax = Math.min(x1,x2), bx = Math.max(x1,x2);
+  const ay = Math.min(y1,y2), by = Math.max(y1,y2);
+  const picked = [];
+  for(const u of S.units){
+    if(u.dead || u.owner !== 0) continue;
+    const p = w2s(u.x,u.y);
+    if(p.x>=ax && p.x<=bx && p.y>=ay && p.y<=by) picked.push(u);
+  }
+  if(additive){
+    for(const u of picked) if(!S.sel.includes(u)) S.sel.push(u);
+  } else {
+    S.sel = picked;
+  }
+  S.selBuilding = null;
+  refreshPanel();
+}
+
+// 小地图点击跳视角
+mini.addEventListener('mousedown', e=>{
+  const r = mini.getBoundingClientRect();
+  cam.x = (e.clientX - r.left)/r.width * WW;
+  cam.y = (e.clientY - r.top)/r.height * WH;
+  clampCam();
+});
+
+function clampCam(){
+  const halfW = VW/2/cam.z, halfH = VH/2/cam.z;
+  cam.x = clamp(cam.x, Math.min(halfW, WW/2), Math.max(WW-halfW, WW/2));
+  cam.y = clamp(cam.y, Math.min(halfH, WH/2), Math.max(WH-halfH, WH/2));
+}
+
+window.addEventListener('keydown', e=>{
+  const k = e.key.toLowerCase();
+  input.keys[k] = true;
+
+  if(k === 'escape'){
+    S.placing = null; S.attackMove = false;
+    cv.style.cursor = 'crosshair';
+    S.sel = []; S.selBuilding = null; refreshPanel();
+    return;
+  }
+  if(k === 'p'){ S.paused = !S.paused; message(S.paused ? '已暂停' : '继续'); return; }
+  if(k === 'a' && S.sel.length){
+    S.attackMove = true; cv.style.cursor = 'cell';
+    message('攻击移动：左键选择目标位置');
+    return;
+  }
+  if(k === 'h'){ if(S.sel.length) orderMove(S.sel, S.sel[0].x, S.sel[0].y, false); }
+
+  // 编队
+  if(/^[1-9]$/.test(k)){
+    if(e.ctrlKey || e.metaKey){
+      S.groups[k] = S.sel.filter(u=>!u.dead);
+      message('编队 ' + k + ' 已保存');
+    } else if(S.groups[k]){
+      S.sel = S.groups[k].filter(u=>!u.dead);
+      S.selBuilding = null;
+      refreshPanel();
+    }
+  }
+});
+
+window.addEventListener('keyup', e=>{ input.keys[e.key.toLowerCase()] = false; });
+
+function updateCamera(dt){
+  const sp = 780/cam.z * dt;
+  let dx = 0, dy = 0;
+  if(input.keys['a'] && input.keys['shift']){} // 占位，避免和 A 攻击移动冲突
+  if(input.keys['arrowleft']) dx -= 1;
+  if(input.keys['arrowright']) dx += 1;
+  if(input.keys['arrowup']) dy -= 1;
+  if(input.keys['arrowdown']) dy += 1;
+  if(dx || dy){ cam.x += dx*sp; cam.y += dy*sp; clampCam(); }
+}
+
+/* =========================================================================
+   14. UI 面板
+   ========================================================================= */
+const panelEl = document.getElementById('panel');
+const tipEl = document.getElementById('tip');
+let tipTimer = 0;
+
+function message(txt){
+  tipEl.textContent = txt;
+  tipEl.classList.add('on');
+  clearTimeout(tipTimer);
+  tipTimer = setTimeout(()=> tipEl.classList.remove('on'), 1800);
+}
+
+function menuItems(){
+  const b = S.selBuilding;
+  if(b && !b.dead && b.owner === 0 && b.buildT >= BUILD[b.type].time){
+    if(b.type === 'barracks') return [{k:'inf', kind:'unit'}];
+    if(b.type === 'factory')  return [{k:'tank', kind:'unit'}, {k:'harv', kind:'unit'}];
+    if(b.type === 'yard')     return ['power','refinery','barracks','factory'].map(k=>({k, kind:'build'}));
+  }
+  if(S.sel.length) return [];
+  if(S.buildings.some(x=>x.owner===0 && x.type==='yard' && !x.dead))
+    return ['power','refinery','barracks','factory'].map(k=>({k, kind:'build'}));
+  return [];
+}
+
+function refreshPanel(){
+  const items = menuItems();
+  const title = panelEl.querySelector('.ptitle');
+  const box = panelEl.querySelector('.btns');
+
+  if(S.sel.length){
+    const n = S.sel.length;
+    const names = {};
+    for(const u of S.sel) names[UNIT[u.type].name] = (names[UNIT[u.type].name]||0)+1;
+    title.textContent = '已选 ' + n + ' 个单位 · ' +
+      Object.entries(names).map(([k,v])=>k+'×'+v).join(' ');
+  } else if(S.selBuilding && !S.selBuilding.dead){
+    const b = S.selBuilding, d = BUILD[b.type];
+    const building = b.buildT < d.time;
+    title.textContent = (b.owner ? '敌军 ' : '') + d.name +
+      (building ? '  建造中 ' + Math.round(b.buildT/d.time*100) + '%' : '');
+  } else {
+    title.textContent = '建造（选建造厂看更多）';
+  }
+
+  if(!items.length){ box.innerHTML = ''; panelEl.style.display = 'block'; return; }
+  panelEl.style.display = 'block';
+  box.innerHTML = items.map(it=>{
+    const meta = it.kind === 'build' ? BUILD[it.k] : UNIT[it.k];
+    return `<button data-k="${it.k}" data-kind="${it.kind}">
+      ${meta.name}<i>$${meta.cost}</i></button>`;
+  }).join('');
+
+  box.querySelectorAll('button').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const k = btn.dataset.k, kind = btn.dataset.kind;
+      if(kind === 'build'){
+        if(S.credits[0] < BUILD[k].cost){ message('资金不足'); return; }
+        S.placing = k;
+        cv.style.cursor = 'copy';
+        message('左键放置 ' + BUILD[k].name + '，右键取消');
+      } else {
+        queueProd(S.selBuilding, k);
+        refreshPanel();
+      }
+    });
+  });
+  updatePanelAfford();
+}
+
+function updatePanelAfford(){
+  panelEl.querySelectorAll('button').forEach(btn=>{
+    const k = btn.dataset.k, kind = btn.dataset.kind;
+    const cost = kind === 'build' ? BUILD[k].cost : UNIT[k].cost;
+    btn.classList.toggle('off', S.credits[0] < cost);
+  });
+}
+
+function updateTopBar(){
+  document.getElementById('ui-credits').textContent = Math.round(S.credits[0]);
+  document.getElementById('ui-power').textContent =
+    (()=>{ let g=0,u=0; for(const b of S.buildings){ if(b.dead||b.owner!==0||b.buildT<BUILD[b.type].time) continue;
+      const p=BUILD[b.type].power; if(p>0) g+=p; else u-=p; } return g-u; })();
+  document.getElementById('ui-army').textContent =
+    S.units.filter(u=>u.owner===0 && !u.dead && u.type!=='harv').length;
+  updatePanelAfford();
+}
+
+/* =========================================================================
+   15. 开局 / 胜负
+   ========================================================================= */
+function setup(){
+  resize();
+  genWorld();
+
+  // 我方基地（左下）
+  addBuilding('yard', 8, 58, 0, true);
+  addUnit('inf', 10*TILE, 62*TILE, 0);
+  addUnit('inf', 11*TILE, 62*TILE, 0);
+  addUnit('harv', 12*TILE, 60*TILE, 0).state = 'idle';
+
+  // 敌方基地（右上），一次性给齐，方便你观察一套完整基地长什么样
+  addBuilding('yard', 63, 14, 1, true);
+  addBuilding('power', 59, 14, 1, true);
+  addBuilding('refinery', 60, 18, 1, true);
+  addBuilding('barracks', 64, 18, 1, true);
+  addBuilding('factory', 56, 18, 1, true);
+  addUnit('inf', 62*TILE, 21*TILE, 1);
+  addUnit('inf', 63*TILE, 21*TILE, 1);
+  addUnit('harv', 58*TILE, 20*TILE, 1);
+
+  cam.x = 10*TILE; cam.y = 58*TILE; cam.z = 0.95;
+  clampCam();
+  refreshPanel();
+
+  setTimeout(()=> message('先建【电厂】和【精炼厂】—— 精炼厂会送你一辆采矿车'), 400);
+  setTimeout(()=> message('右键移动，右键点敌人 = 攻击；A 键是攻击移动'), 6000);
+}
+
+function checkEnd(){
+  if(S.over) return;
+  const alive = (o)=> S.buildings.some(b=>b.owner===o && !b.dead);
+  if(!alive(1)){
+    S.over = 1; showEnd('胜  利', '#b8f0a0');
+  } else if(!alive(0)){
+    S.over = -1; showEnd('失  败', '#ff9a8a');
+  }
+}
+
+function showEnd(txt, color){
+  const el = document.getElementById('end');
+  el.textContent = txt;
+  el.style.color = color;
+  el.style.display = 'grid';
+}
+
+/* =========================================================================
+   16. 主循环
+   —— 固定步长不是必须的，但把 dt 夹在 0.05 以内能避免切标签页回来「瞬移」。
+   ========================================================================= */
+function update(dt){
+  S.t += dt;
+  updateCamera(dt);
+
+  for(const u of S.units){
+    if(u.dead) continue;
+    if(u.type === 'harv') updateHarvester(u, dt);
+    else updateCombatUnit(u, dt);
+  }
+  for(const b of S.buildings) updateBuilding(b, dt);
+
+  resolveCollisions();
+  updateBullets(dt);
+  updateFx(dt);
+  updateAI(dt);
+
+  S.units = S.units.filter(u=>!u.dead);
+  S.buildings = S.buildings.filter(b=>!b.dead);
+  S.sel = S.sel.filter(u=>!u.dead);
+  if(S.selBuilding && S.selBuilding.dead) S.selBuilding = null;
+
+  checkEnd();
+}
+
+let last = performance.now();
+function frame(now){
+  const dt = Math.min(0.05, (now-last)/1000);
+  last = now;
+  if(!S.over && !S.paused) update(dt);
+  render();
+  updateTopBar();
+  requestAnimationFrame(frame);
+}
+
+setup();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
