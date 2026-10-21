@@ -338,13 +338,13 @@ const FONT    = '"Songti SC","STSong","SimSun","Noto Serif SC",serif';
    底色是刻意压深的，不然全是浅白，扫一眼分不出谁几阶。 */
 const TIER = [
   null,
-  /* 血量逐阶翻倍（1→2→4→8→16）：升阶就是「质变」，一眼能算清账。
-   原来是 1/1.7/2.7/4.2/6.4 的缓曲线，跳阶没有感觉。攻击与攻速仍走缓曲线。 */
+  /* 血量逐阶翻倍（1→2→4→8→16）、攻速每阶 ×1.5（1→1.5→2.25→3.4→5.1）：升阶就是「质变」，一眼能算清账。
+   攻击力仍走缓曲线（1.6/2.5/3.9/6.0）。5 阶满级 DPS ≈ 1 阶的 30 倍，后期靠它分胜负。 */
   { n:'卒', c:'#6b6357', bg:'#efeade', bd:'#a89c86', bar:'#a89c86', hpMul:1.00, atkMul:1.00, rateMul:1.00 },
-  { n:'士', c:'#22643a', bg:'#d9eedd', bd:'#4c9a62', bar:'#3f8a55', hpMul:2.00, atkMul:1.60, rateMul:1.16 },
-  { n:'校', c:'#1c4f8c', bg:'#d8e9fb', bd:'#3d7cc2', bar:'#2f6cb0', hpMul:4.00, atkMul:2.50, rateMul:1.34 },
-  { n:'尉', c:'#5c2c86', bg:'#e8d9f8', bd:'#8850bb', bar:'#7740ab', hpMul:8.00, atkMul:3.90, rateMul:1.54 },
-  { n:'将', c:'#845607', bg:'#fae5b8', bd:'#c08f16', bar:'#c08f16', hpMul:16.0, atkMul:6.00, rateMul:1.78 },
+  { n:'士', c:'#22643a', bg:'#d9eedd', bd:'#4c9a62', bar:'#3f8a55', hpMul:2.00, atkMul:1.60, rateMul:1.50 },
+  { n:'校', c:'#1c4f8c', bg:'#d8e9fb', bd:'#3d7cc2', bar:'#2f6cb0', hpMul:4.00, atkMul:2.50, rateMul:2.25 },
+  { n:'尉', c:'#5c2c86', bg:'#e8d9f8', bd:'#8850bb', bar:'#7740ab', hpMul:8.00, atkMul:3.90, rateMul:3.38 },
+  { n:'将', c:'#845607', bg:'#fae5b8', bd:'#c08f16', bar:'#c08f16', hpMul:16.0, atkMul:6.00, rateMul:5.06 },
 ];
 const MAX_TIER = 5;
 // 名将按自己的曲线成长（上限 5 阶）：血量/攻击更平缓，攻速一样随阶提升
@@ -365,20 +365,20 @@ const heroRateMul= lv => 1 + 0.14*(lv-1);
 /* 数值基准：刀兵 = 血 80 / 攻 10 / 攻速 1.0（DPS 10）。
    另外三样都围着这条基准线摆，规矩是「射程是白拿的输出时间」——
    射程越长，DPS 与血量压得越低，否则远程等于白吃伤害。
-     刀  100/10/1.00 → DPS 10.0   射程 1.4 格  最厚最稳
-     枪   90/14/0.80 → DPS 11.2   射程 2.1 格  单发最重，隔一格先手
-     弓   75/ 8/1.20 → DPS  9.6   射程 4.6 格  全程有输出时间，所以 DPS 偏低
-     骑   80/ 7/1.90 → DPS 13.3   射程 1.6 格  DPS 最高、行军最快，血薄怕枪
-   铁律：克制方 1v1 必须赢。刀打弓 4.7s / 枪打骑 4.5s / 弓打枪 5.9s / 骑打刀 4.7s，
-   反过来（逆克制）要 6.7~10.4s —— 克制环是算得出来的，不是贴标签。 */
+   射程整格化：刀 1 格 / 枪 2 格 / 骑 2 格 / 弓 3 格（一格 = CELL = 72px）。
+     刀  80/10/1.00 → DPS 10.0   射程 1 格  最厚最稳
+     枪  72/14/0.80 → DPS 11.2   射程 2 格  单发最重，隔一格先手
+     弓  60/ 8/1.20 → DPS  9.6   射程 3 格  全程有输出时间，所以 DPS 偏低
+     骑  64/ 7/1.90 → DPS 13.3   射程 2 格  DPS 最高、行军最快，血薄怕枪
+   铁律：克制方 1v1 必须赢（1 阶 1v1 静态对拼）。 */
 const UNITS = {
-  dao:   { char:'刀', name:'刀兵', hp:80,  atk:10, rate:1.00, range:104, spd:1.00, w:40, mantou:1, kind:'近战', vs:['gong'],
+  dao:   { char:'刀', name:'刀兵', hp:80,  atk:10, rate:1.00, range:1*CELL, spd:1.00, w:40, mantou:1, kind:'近战', vs:['gong'],
            desc:'短刀近身砍杀 · 射程最短、血量最厚，站桩扛线首选，克弓兵' },
-  qiang: { char:'枪', name:'枪兵', hp:72,  atk:14, rate:0.80, range:152, spd:0.90, w:38, mantou:1, kind:'近战', vs:['qi'],
-           desc:'长枪戳刺 · 比刀长半格先手，单发最重但出手慢，克骑兵' },
-  gong:  { char:'弓', name:'弓兵', hp:60,  atk:8,  rate:1.20, range:330, spd:0.95, w:34, mantou:1, kind:'远程', vs:['qiang'],
+  qiang: { char:'枪', name:'枪兵', hp:72,  atk:14, rate:0.80, range:2*CELL, spd:0.90, w:38, mantou:1, kind:'近战', vs:['qi'],
+           desc:'长枪戳刺 · 比刀远一格先手，单发最重但出手慢，克骑兵' },
+  gong:  { char:'弓', name:'弓兵', hp:60,  atk:8,  rate:1.20, range:3*CELL, spd:0.95, w:34, mantou:1, kind:'远程', vs:['qiang'],
            desc:'万箭齐发 · 射程最远、全程有输出时间，代价是 DPS 与血量都最低，克枪兵' },
-  qi:    { char:'骑', name:'骑兵', hp:64,  atk:7,  rate:1.90, range:118, spd:1.55, w:38, mantou:1, kind:'近战', vs:['dao'],
+  qi:    { char:'骑', name:'骑兵', hp:64,  atk:7,  rate:1.90, range:2*CELL, spd:1.55, w:38, mantou:1, kind:'近战', vs:['dao'],
            desc:'轻骑冲阵 · 攻速与行军都最快、DPS 最高，单发很轻、血量偏薄，克刀兵' },
 };
 const BASE_KEYS = ['dao','qiang','gong','qi'];
