@@ -338,13 +338,14 @@ const FONT    = '"Songti SC","STSong","SimSun","Noto Serif SC",serif';
    底色是刻意压深的，不然全是浅白，扫一眼分不出谁几阶。 */
 const TIER = [
   null,
-  /* 血量逐阶翻倍（1→2→4→8→16）、攻速每阶 ×1.5（1→1.5→2.25→3.4→5.1）：升阶就是「质变」，一眼能算清账。
-   攻击力仍走缓曲线（1.6/2.5/3.9/6.0）。5 阶满级 DPS ≈ 1 阶的 30 倍，后期靠它分胜负。 */
+  /* 血/攻每阶 ×1.8（1→1.8→3.24→5.83→10.5）、攻速每阶 ×1.5（1→1.5→2.25→3.4→5.1）：
+   升阶就是「质变」。同阶互拼时间每阶缩短约 1/3（DPS 涨 2.7 倍、血只涨 1.8 倍），
+   跨阶压制主要靠攻速滚出来 —— 5 阶满级 DPS ≈ 1 阶的 53 倍。 */
   { n:'卒', c:'#6b6357', bg:'#efeade', bd:'#a89c86', bar:'#a89c86', hpMul:1.00, atkMul:1.00, rateMul:1.00 },
-  { n:'士', c:'#22643a', bg:'#d9eedd', bd:'#4c9a62', bar:'#3f8a55', hpMul:2.00, atkMul:1.60, rateMul:1.50 },
-  { n:'校', c:'#1c4f8c', bg:'#d8e9fb', bd:'#3d7cc2', bar:'#2f6cb0', hpMul:4.00, atkMul:2.50, rateMul:2.25 },
-  { n:'尉', c:'#5c2c86', bg:'#e8d9f8', bd:'#8850bb', bar:'#7740ab', hpMul:8.00, atkMul:3.90, rateMul:3.38 },
-  { n:'将', c:'#845607', bg:'#fae5b8', bd:'#c08f16', bar:'#c08f16', hpMul:16.0, atkMul:6.00, rateMul:5.06 },
+  { n:'士', c:'#22643a', bg:'#d9eedd', bd:'#4c9a62', bar:'#3f8a55', hpMul:1.80, atkMul:1.80, rateMul:1.50 },
+  { n:'校', c:'#1c4f8c', bg:'#d8e9fb', bd:'#3d7cc2', bar:'#2f6cb0', hpMul:3.24, atkMul:3.24, rateMul:2.25 },
+  { n:'尉', c:'#5c2c86', bg:'#e8d9f8', bd:'#8850bb', bar:'#7740ab', hpMul:5.83, atkMul:5.83, rateMul:3.38 },
+  { n:'将', c:'#845607', bg:'#fae5b8', bd:'#c08f16', bar:'#c08f16', hpMul:10.50, atkMul:10.50, rateMul:5.06 },
 ];
 const MAX_TIER = 5;
 // 名将按自己的曲线成长（上限 5 阶）：血量/攻击更平缓，攻速一样随阶提升
