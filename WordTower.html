@@ -3912,7 +3912,7 @@ function drawOver(){
 /* ---------------- 暂停面板 ---------------- */
 function drawPause(){
   ctx.fillStyle = 'rgba(28,26,23,0.66)'; ctx.fillRect(0,0,W,H);
-  const pw = 520, ph = 430, px = (W-pw)/2, py = (H-ph)/2;
+  const pw = 520, ph = 516, px = (W-pw)/2, py = (H-ph)/2;
   ctx.fillStyle = PAPER_L;
   rr(ctx, px, py, pw, ph, 20); ctx.fill();
   ctx.strokeStyle = 'rgba(90,80,65,0.35)'; ctx.lineWidth = 2; ctx.stroke();
@@ -3941,6 +3941,24 @@ function drawPause(){
     ctx.fillText(info[i][0], cx, py + 172);
   }
 
+  // 难度：随时能改，下一帧起 AI 就按新档思考（不用重开一局）
+  G._lvBtns = [];
+  ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
+  ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+  ctx.fillText('难度', W/2 - 168, py + 224);
+  for (let i = 0; i < AI_LEVELS.length; i++){
+    const on = (i === AI_LV);
+    const r = { x: W/2 - 156 + i*106, y: py + 206, w: 100, h: 34 };
+    G._lvBtns.push({ i, r });
+    ctx.fillStyle = on ? 'rgba(176,58,46,0.92)' : 'rgba(90,80,65,0.10)';
+    rr(ctx, r.x, r.y, r.w, r.h, 9); ctx.fill();
+    if (!on){ ctx.strokeStyle = 'rgba(90,80,65,0.22)'; ctx.lineWidth = 1; rr(ctx, r.x, r.y, r.w, r.h, 9); ctx.stroke(); }
+    ctx.fillStyle = on ? '#fff6ee' : INK2; ctx.font = (on ? 'bold ' : '') + '14px ' + FONT;
+    ctx.textAlign = 'center';
+    ctx.fillText(AI_LEVELS[i].name, r.x + r.w/2, r.y + r.h/2 + 1);
+  }
+  ctx.textAlign = 'left';
+
   const items = [
     { id:'resume',  label:'继 续 迎 战', primary:true },
     { id:'restart', label:'重 新 开 始', primary:false },
@@ -3949,7 +3967,7 @@ function drawPause(){
   G._pauseBtns = [];
   for (let i = 0; i < items.length; i++){
     const it = items[i];
-    const b = { x: W/2 - 150, y: py + 204 + i*72, w: 300, h: 56 };
+    const b = { x: W/2 - 150, y: py + 258 + i*72, w: 300, h: 56 };
     G._pauseBtns.push({ id: it.id, r: b });
     if (it.primary){
       ctx.fillStyle = 'rgba(70,60,45,0.18)';
@@ -4038,6 +4056,9 @@ function onDown(ev){
 
   // 暂停中：只响应暂停面板
   if (G.paused){
+    for (const b of (G._lvBtns || [])) if (inRect(p, b.r)){
+      const nm = setAILevel(b.i); sfx('click'); toast('难度 · ' + nm); return;
+    }
     for (const b of (G._pauseBtns || [])) if (inRect(p, b.r)){ pauseAction(b.id); return; }
     return;
   }
