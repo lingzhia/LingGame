@@ -63,10 +63,10 @@ const cellAt = (c, r) => c + r*COLS;
    一局开始时只发 START_OPEN 格熟地 —— 从「离路近、贴着主公、靠前线」的次序里挑最好的几格，
    其余可布防的格子全是荒地，得一格一格用铲子挖开。
    电脑半场拿的是同一张名单的上下镜像（FREE_E），两边地界完全对等。 */
-const START_OPEN = 5;
-/* 开局只有 5 格熟地，扩地全靠铲子 —— 铲子的掉落率就是「扩张速度」这一个旋钮。
-   5.5% 时一局下来挖不开几格，盘面永远是那五个坑；提到 10% 后大约每两手牌能见一把铲子。 */
-const SHOVEL_RATE = 0.10;
+const START_OPEN = 7;
+/* 开局熟地数直接决定「守军上限」，所以它和铲子掉率是一对：7 格起手 + 铲子 16%，
+   一局大约能开到 10-12 格。原来 5 格 + 10% 时整局只有 6-8 格，第 3 波起就摆不满防线了。 */
+const SHOVEL_RATE = 0.16;
 let FREE_M = {}, FREE_E = {};        // 熟地名单：我方 / 电脑半场（上下镜像）
 function computeFreeLand(){
   const cand = [];
@@ -606,6 +606,11 @@ function eachUnit(board, fn){
 }
 function boardCount(board){
   let n = 0; eachUnit(board, () => n++); return n;
+}
+/* 面板上的「守 N」只数真能打的兵：单字（1 血、只作拼将材料）不算守军，
+   否则盘面看着有 6 个守军，其实两个是一碰就碎的字。 */
+function guardCount(board){
+  let n = 0; eachUnit(board, u => { if (u.kind === 'unit') n++; }); return n;
 }
 /* 清掉某个格的单位（名将连同另一格一起清） */
 function clearCells(board, idx){
@@ -1687,7 +1692,7 @@ function killDefender(mine, idx){
 function killMyUnit(idx){ killDefender(true, idx); }
 
 /* 主公挨打：一个兵换一滴血 —— 兵走到主公那一格就当场阵亡（updateMarchers 里先移除），
-   主公这边固定掉 1 命、补 3 馒头。没有无敌帧：3 个兵同时到就是掉 3 命。
+   主公这边固定掉 1 命，不补钱。没有无敌帧：3 个兵同时到就是掉 3 命。
    神兵符期间兵照样死，只是主公不掉血。 */
 function hitAdu(side){
   const mine = side === 'my';
@@ -1695,13 +1700,11 @@ function hitAdu(side){
   if (mine){
     G.myLife--; G.leaks++; G.aduHurtM = 0.45; sfx('lost');
     burst(ADU_M.x, ADU_M.y, 30, SEAL);
-    G.mantou += 3;                               // 主公每掉 1 命补 3 馒头（双方同规则）
-    floater(ADU_M.x, ADU_M.y - 58, '主公 −1 命 · +3 馒头', GOLD);
+    floater(ADU_M.x, ADU_M.y - 58, '主公 −1 命', SEAL);
     if (G.myLife <= 0) endGame(false);
   } else {
     G.enLife--; G.aiLeaks++; G.aduHurtE = 0.45; sfx('hero');
     burst(ADU_E.x, ADU_E.y, 30, GOLD);
-    aiGain(3, ADU_E.x, ADU_E.y + 46);            // 电脑的主公挨打同样补 3 馒头
     if (G.enLife <= 0) endGame(true);
   }
 }
@@ -2318,7 +2321,7 @@ function updateFx(dt){
    出兵节奏：每 WAVE_GAP 秒一批，不管上一批走没走完；
    但如果某一方把这一波**提前清干净**了，立刻开下一波（两边一起开，不等另一边）。
    一批的兵力 = 3 + 2×波次（第 1 批 5 个、第 2 批 7 个、第 3 批 9 个……）。 */
-const WAVE_GAP = 20;
+const WAVE_GAP = 26;
 /* 速清提前开波的最短间隔：免得刚开波就「场上没人」→ 无限连刷 */
 const WAVE_EARLY_MIN = 3;
 
@@ -2525,7 +2528,7 @@ function drawBoardBase(baseY, board, isEnemy){
       }
       // 荒地：玩家要用铲子挖，电脑没有铲子就一律用不了
       const locked = mine ? !G.unlocked[idx] : !aiLandOK(idx);
-      // 现在开局只有 5 格熟地，荒地占了大半张盘 —— 每格都画个小铲子会糊成一片，
+      // 开局 7 格熟地、其余是荒地 —— 每格都画个小铲子会糊成一片，
       // 所以只在「手里正拖着铲子」的时候才把可开垦的格子点亮，平时只留一层淡绿。
       const dg2 = G.dragger;
       const digging = mine && dg2 && dg2.moved && dg2.tile && dg2.tile.kind === 'shovel';
@@ -3150,17 +3153,17 @@ function drawInfoPanel(){
     ctx.fillText('馒', x0 + 82, ly + 1);
     ctx.fillStyle = INK; ctx.font = 'bold 20px ' + FONT; ctx.textAlign = 'left';
     ctx.fillText(String(Math.floor(moneyOf(s.mine))), x0 + 96, ly + 1);
-    // 守军 / 出击
-    const guard = boardCount(s.mine ? G.board : G.enBoard);
+    // 守军 / 出击（排队没出发的不算出击）
+    const guard = guardCount(s.mine ? G.board : G.enBoard);
     let out = 0;
-    for (const m of G.marchers) if (m.owner === (s.mine ? 'me' : 'ai')) out++;
+    for (const m of G.marchers) if (m.owner === (s.mine ? 'me' : 'ai') && !m.queued) out++;
     ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
     ctx.fillText('守 ' + guard + ' · 出击 ' + out, x0 + 150, ly + 2);
     // 本波剩余
     const left = s.mine ? G.spawnLeft : G.aiSpawnLeft;
     ctx.textAlign = 'right';
     ctx.fillStyle = left > 0 ? SEAL : INK3;
-    ctx.fillText('本波余 ' + left, x1 - 12, ly + 2);
+    ctx.fillText('待出 ' + left, x1 - 12, ly + 2);
 
     // 战功条
     const merit = s.mine ? G.merit : G.ai.merit;
@@ -3279,8 +3282,8 @@ function drawEnemyPanel(){
   ctx.fillStyle = INK3; ctx.font = '12px ' + FONT;
   ctx.fillText('敌军主公', R.x + 20, cy);
   drawLifeRow(R.x + 82, cy, G.enLife, G.enMax, SEAL);
-  let guard = boardCount(G.enBoard), out = 0;
-  for (const m of G.marchers) if (m.owner === 'me') out++;
+  let guard = guardCount(G.enBoard), out = 0;
+  for (const m of G.marchers) if (m.owner === 'me' && !m.queued) out++;
   ctx.fillStyle = INK3; ctx.font = '12px ' + FONT; ctx.textAlign = 'right';
   ctx.fillText('守 ' + guard + ' · 我军出击 ' + out, R.x + R.w - 20, cy);
 }
@@ -3317,8 +3320,8 @@ function drawEnemyBig(){
   ctx.fillText('敌军主公', 34, cy);
   drawLifeRow(100, cy, G.enLife, G.enMax, SEAL);
   ctx.fillStyle = INK3; ctx.font = '13px ' + FONT;
-  let out = 0; for (const m of G.marchers) if (m.owner === 'me') out++;
-  ctx.fillText('守军 ' + boardCount(G.enBoard) + ' · 我军出击 ' + out, 260, cy);
+  let out = 0; for (const m of G.marchers) if (m.owner === 'me' && !m.queued) out++;
+  ctx.fillText('守军 ' + guardCount(G.enBoard) + ' · 我军出击 ' + out, 260, cy);
   ctx.textAlign = 'right';
   ctx.fillText('馒头 ' + Math.floor(G.ai.mantou), W - 34, cy);
 }
@@ -3675,7 +3678,7 @@ function drawIntro(){
 
   const lines = [
     ['一', '两块战场', '上下各有一块 8×8 棋盘，各守一个主公；不设时间上限，哪边主公先被打光就输'],
-    ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局只有 5 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
+    ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局 7 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
     ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝沿自家路赶到出兵格后面、一格一个排好队（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
     ['四', '征兵', '开局 8 馒头；征一次 5 个，之后每征一次 +1，只涨不降（旧兵与铲子回收成馒头）；兵营里的单字会在征兵时自动换成 1 级兵，直接排上我方路'],
     ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；主公每挨一击补 3'],
