@@ -363,24 +363,28 @@ const heroRateMul= lv => 1 + 0.14*(lv-1);
    - w    = 画在路上的圆盘直径
    - mantou = 被对面击杀时，击杀方能拿到的馒头（默认 1 个，别靠它撑经济）
    克制环（补齐了原来重复的两条）：骑 → 刀 → 弓 → 枪 → 骑，伤害 ×1.6 */
-/* 数值基准：刀兵 = 血 80 / 攻 10 / 攻速 1.0（DPS 10）。
-   另外三样都围着这条基准线摆，规矩是「射程是白拿的输出时间」——
-   射程越长，DPS 与血量压得越低，否则远程等于白吃伤害。
+/* 数值基准：刀兵 = 血 100 / 攻 10 / 攻速 1.0。
    射程整格化：刀 1 格 / 枪 2 格 / 骑 2 格 / 弓 3 格（一格 = CELL = 72px）。
-     刀  80/10/1.00 → DPS 10.0   射程 1 格  最厚最稳
-     枪  72/14/0.80 → DPS 11.2   射程 2 格  单发最重，隔一格先手
-     弓  60/ 8/1.20 → DPS  9.6   射程 3 格  全程有输出时间，所以 DPS 偏低
-     骑  64/ 7/1.90 → DPS 13.3   射程 2 格  DPS 最高、行军最快，血薄怕枪
+   四兵靠「伤害形态」分工，不再靠数值高低分工（单体 / 穿刺 / 范围）。
+     刀 100/10/1.00 1格 单体   最厚最稳，扛线
+     枪  80/10/0.80 2格 穿刺   一条线全中，对密集波次价值最高
+     弓  60/ 8/1.00 3格 单体   射程最远但脆
+     骑  80/ 8/0.80 2格 范围   圈内全中，清群兵专用
    铁律：克制方 1v1 必须赢（1 阶 1v1 静态对拼）。 */
+/* 伤害形态（hitMode）：这是四个兵种唯一真正的「机制」差异，数值差只是表象。
+   single = 单体，只结算主目标
+   pierce = 穿刺：朝主目标的方向一条线，落在线上、且在射程内的敌方单位全吃伤害
+   aoe    = 范围：射程圈内的敌方单位全吃伤害
+   合成兵（FUSE）没有 hitMode，默认单体 —— 合成是「数值升级」，不是换机制。 */
 const UNITS = {
-  dao:   { char:'刀', name:'刀兵', hp:80,  atk:10, rate:1.00, range:1*CELL, spd:1.00, w:40, mantou:1, kind:'近战', vs:['gong'],
-           desc:'短刀近身砍杀 · 射程最短、血量最厚，站桩扛线首选，克弓兵' },
-  qiang: { char:'枪', name:'枪兵', hp:72,  atk:14, rate:0.80, range:2*CELL, spd:0.90, w:38, mantou:1, kind:'近战', vs:['qi'],
-           desc:'长枪戳刺 · 比刀远一格先手，单发最重但出手慢，克骑兵' },
-  gong:  { char:'弓', name:'弓兵', hp:60,  atk:8,  rate:1.20, range:3*CELL, spd:0.95, w:34, mantou:1, kind:'远程', vs:['qiang'],
-           desc:'万箭齐发 · 射程最远、全程有输出时间，代价是 DPS 与血量都最低，克枪兵' },
-  qi:    { char:'骑', name:'骑兵', hp:64,  atk:7,  rate:1.90, range:2*CELL, spd:1.55, w:38, mantou:1, kind:'近战', vs:['dao'],
-           desc:'轻骑冲阵 · 攻速与行军都最快、DPS 最高，单发很轻、血量偏薄，克刀兵' },
+  dao:   { char:'刀', name:'刀兵', hp:100, atk:10, rate:1.00, range:1*CELL, spd:1.00, w:40, mantou:1, kind:'近战', hitMode:'single', vs:['gong'],
+           desc:'短刀近身砍杀 · 射程最短、血量最厚，单体伤害，站桩扛线首选，克弓兵' },
+  qiang: { char:'枪', name:'枪兵', hp:80,  atk:10, rate:0.80, range:2*CELL, spd:0.90, w:38, mantou:1, kind:'近战', hitMode:'pierce', vs:['qi'],
+           desc:'长枪直刺 · 穿刺伤害，朝一个方向捅穿一条线上的敌人，出手慢，克骑兵' },
+  gong:  { char:'弓', name:'弓兵', hp:60,  atk:8,  rate:1.00, range:3*CELL, spd:0.95, w:34, mantou:1, kind:'远程', hitMode:'single', vs:['qiang'],
+           desc:'万箭齐发 · 射程最远，单体伤害，代价是血量最低，克枪兵' },
+  qi:    { char:'骑', name:'骑兵', hp:80,  atk:8,  rate:0.80, range:2*CELL, spd:1.55, w:38, mantou:1, kind:'近战', hitMode:'aoe', vs:['dao'],
+           desc:'轻骑冲阵 · 范围伤害，圈内敌人全中；出手慢、单点弱，血量厚，克刀兵' },
 };
 const BASE_KEYS = ['dao','qiang','gong','qi'];
 
@@ -403,6 +407,13 @@ const FUSE = {
 function fuseKey(a, b){
   const k1 = a + '+' + b, k2 = b + '+' + a;
   return FUSE[k1] ? k1 : (FUSE[k2] ? k2 : null);
+}
+/* 伤害形态查询：守军/行军兵都走这里。合成兵与名将没有 hitMode = 单体。 */
+function hitModeOf(u){
+  if (!u) return 'single';
+  if (u.hitMode) return u.hitMode;
+  const t = u.type && (UNITS[u.type] || FUSE[u.type]);
+  return (t && t.hitMode) || 'single';
 }
 
 /* ---------------- 12 名将 ---------------- */
@@ -1411,7 +1422,7 @@ function newMarcher(owner, key, level, elite){
   const hp = Math.round(u.hp * st.hpMul * k * MARCH_HP_MUL * Math.pow(ELITE_HP, el));
   return {
     owner, key, level: lv, elite: el, char: u.char,
-    name: u.name + (el ? '+' + el : ''), vs: u.vs || [],
+    name: u.name + (el ? '+' + el : ''), vs: u.vs || [], hitMode: u.hitMode || 'single',
     hp, maxHp: hp,
     atk: u.atk * st.atkMul * k,
     rate: u.rate * st.rateMul,
@@ -1646,18 +1657,39 @@ function strikeMarcher(m, foe){
   if (m.vs && m.vs.indexOf(foe.key) >= 0) d *= 1.6;
   burst(foe.x, foe.y, 2, colorOf(m.owner));
   damageMarcher(foe, d, m.owner);
+  // 穿刺 / 范围：顺带把同一方向或同一圈里的其它敌兵一起打
+  const mode = hitModeOf(m);
+  if (mode !== 'single'){
+    const extra = splashByMarcherDuel(m, foe);
+    for (const o of extra){
+      let de = m.atk * atkMulOf(m.owner);
+      if (m.vs && m.vs.indexOf(o.key) >= 0) de *= 1.6;
+      damageMarcher(o, de, m.owner);
+    }
+    if (extra.length) fxHit(mode, m.x, m.y, foe.x, foe.y, m.range, colorOf(m.owner));
+  }
 }
 /* 行军兵打对面棋盘上的守军 */
 function strikeDefender(m, tgt){
   if (m.cd > 0) return;
   m.cd = 1 / Math.max(0.3, m.rate);
   // 伤害 = 攻方攻击 × 攻方加成 ÷ 守方减伤（下限 MY_DEF_FLOOR），两边同一条公式
-  let d = m.atk * atkMulOf(m.owner) / Math.max(MY_DEF_FLOOR, defMulOf(foeOf(m.owner)));
-  if (m.vs && tgt.u.type && m.vs.indexOf(tgt.u.type) >= 0) d *= 1.6;   // 克制对守军同样生效
-  tgt.u.hp -= d; tgt.u.flash = 0.25; tgt.u.hurt = 1; tgt.u.idleT = 0;   // 挨打了就重置脱战计时（两边同规则）
-  burst(tgt.x, tgt.y, 3, colorOf(m.owner));
+  const hitDef = (t) => {
+    let d = m.atk * atkMulOf(m.owner) / Math.max(MY_DEF_FLOOR, defMulOf(foeOf(m.owner)));
+    if (m.vs && t.u.type && m.vs.indexOf(t.u.type) >= 0) d *= 1.6;   // 克制对守军同样生效
+    t.u.hp -= d; t.u.flash = 0.25; t.u.hurt = 1; t.u.idleT = 0;      // 挨打了就重置脱战计时（两边同规则）
+    burst(t.x, t.y, 3, colorOf(m.owner));
+    if (t.u.hp <= 0) killDefender(m.owner === 'ai', t.idx);
+  };
+  hitDef(tgt);
+  // 穿刺沿「我 → 主目标」的方向捅穿一条线；范围把圈内守军全扫一遍
+  const mode = hitModeOf(m);
+  if (mode !== 'single'){
+    const extra = splashByMarcher(m, tgt);
+    for (const t of extra) if (t.u.hp > 0) hitDef(t);
+    fxHit(mode, m.x, m.y, tgt.x, tgt.y, m.range, colorOf(m.owner));
+  }
   if (Math.random() < 0.24) sfx('hit');
-  if (tgt.u.hp <= 0) killDefender(m.owner === 'ai', tgt.idx);
 }
 /* 迎面撞上的判定距离：两格心距 72，取 46 表示「贴上了」就算顶住 */
 const DUEL_R = 46;
@@ -1786,6 +1818,78 @@ function unitDmg(u, e, mine){
   return d;
 }
 
+/* ---------------- 伤害形态：单体 / 穿刺 / 范围 ----------------
+   穿刺 = 「朝主目标的方向」一条线：只认投影为正、且横向偏移在半宽内的目标。
+   半宽取 34：约等于半个兵盘，斜侧一个身位的敌人扫得到，隔一排的扫不到。 */
+const PIERCE_HALF_W = 34;
+function inCircle(ax, ay, bx, by, r){
+  return Math.hypot(bx - ax, by - ay) <= r;
+}
+function inLine(ax, ay, bx, by, tx, ty, halfW){
+  const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+  if (L < 1e-6) return false;
+  const ux = dx / L, uy = dy / L;
+  const px = tx - ax, py = ty - ay;
+  if (px * ux + py * uy <= 0) return false;             // 在主目标反方向：不算
+  return Math.abs(px * -uy + py * ux) <= halfW;         // 横向偏移
+}
+/* 守军这一击的额外目标（不含主目标） */
+function splashByDefender(u, tgt, mine){
+  const mode = hitModeOf(u);
+  if (mode === 'single') return [];
+  const S = sideInfo(mine), p = unitPos(u, S.baseY);
+  const out = [];
+  for (const e of G.marchers){
+    if (e === tgt || e.hp <= 0 || e.owner !== S.foe) continue;
+    if (mine ? (e.y < MID1) : (e.y > MID1)) continue;    // 和索敌同一条：只打自己半场
+    const hit = mode === 'aoe'
+      ? inCircle(p.x, p.y, e.x, e.y, u.range)
+      : inLine(p.x, p.y, tgt.x, tgt.y, e.x, e.y, PIERCE_HALF_W);
+    if (hit) out.push(e);
+  }
+  return out;
+}
+/* 行军兵这一击的额外守军目标（同样只算踩在路上的守军，和索敌规则一致） */
+function splashByMarcher(m, tgt){
+  const mode = hitModeOf(m);
+  if (mode === 'single') return [];
+  const defMine = m.owner === 'ai';
+  const S = sideInfo(defMine);
+  const out = [];
+  for (let i = 0; i < S.board.length; i++){
+    const u = S.board[i];
+    if (!u || u.kind === 'char' || u.hp <= 0) continue;
+    if (!isAnchor(u, i) || u === tgt.u) continue;
+    if (!defenderOnRoad(u, i, defMine)) continue;
+    const p = unitPos(u, S.baseY);
+    const hit = mode === 'aoe'
+      ? inCircle(m.x, m.y, p.x, p.y, m.range)
+      : inLine(m.x, m.y, tgt.x, tgt.y, p.x, p.y, PIERCE_HALF_W);
+    if (hit) out.push({ u, x: p.x, y: p.y, idx: i });
+  }
+  return out;
+}
+/* 行军兵对撞时的额外敌兵（穿刺沿对撞方向，范围圈内全中） */
+function splashByMarcherDuel(m, foe){
+  const mode = hitModeOf(m);
+  if (mode === 'single') return [];
+  const out = [];
+  for (const o of G.marchers){
+    if (o === m || o === foe || o.hp <= 0 || o.owner === m.owner) continue;
+    const hit = mode === 'aoe'
+      ? inCircle(m.x, m.y, o.x, o.y, m.range)
+      : inLine(m.x, m.y, foe.x, foe.y, o.x, o.y, PIERCE_HALF_W);
+    if (hit) out.push(o);
+  }
+  return out;
+}
+/* 一次出手的视觉反馈：穿刺画一条线、范围画一圈，玩家才看得懂伤害从哪来 */
+function fxHit(mode, ax, ay, bx, by, r, color){
+  if (mode === 'pierce') G.fx.push({ type:'beam', x1:ax, y1:ay, x2:bx, y2:by, t:0, dur:0.22, color:color });
+  else if (mode === 'aoe') G.fx.push({ type:'ring', x:ax, y:ay, r0:16, r1:r, t:0, dur:0.28, color:color });
+}
+
+
 /* 一侧守军的主循环（回血 / 脱战回血 / 大招 / 出手）—— 两边共用这一个函数 */
 function updateSideUnits(dt, mine){
   const S = sideInfo(mine);
@@ -1821,7 +1925,13 @@ function updateSideUnits(dt, mine){
     if (u.cd > 0) continue;
     const tgt = unitTarget(u, mine);
     if (!tgt) continue;
+    const mode = hitModeOf(u);
     dealFrom(u, tgt, unitDmg(u, tgt, mine), mine);
+    if (mode !== 'single'){
+      for (const e of splashByDefender(u, tgt, mine)) dealFrom(u, e, unitDmg(u, e, mine), mine);
+      const ap = unitPos(u, S.baseY);
+      fxHit(mode, ap.x, ap.y, tgt.x, tgt.y, u.range, S.color);
+    }
     u.cd = 1 / Math.max(0.3, u.rate);
     u.swing = 0.26;
     if (Math.random() < 0.28) sfx('hit');
@@ -3651,7 +3761,7 @@ function drawFx(v, foeHalf){
       if (inFoeHalf((f.y1 + f.y2) / 2) !== foeHalf) continue;
       ctx.save();
       ctx.globalAlpha = (1-p) * 0.9;
-      ctx.strokeStyle = GOLD; ctx.lineWidth = 16*(1-p) + 4; ctx.lineCap = 'round';
+      ctx.strokeStyle = f.color || GOLD; ctx.lineWidth = 16*(1-p) + 4; ctx.lineCap = 'round';
       ctx.beginPath(); ctx.moveTo(f.x1, f.y1); ctx.lineTo(f.x2, f.y1 + (f.y2-f.y1)); ctx.stroke();
       ctx.strokeStyle = '#fff3cc'; ctx.lineWidth = 5*(1-p) + 1;
       ctx.beginPath(); ctx.moveTo(f.x1, f.y1); ctx.lineTo(f.x2, f.y1 + (f.y2-f.y1)); ctx.stroke();
@@ -4372,6 +4482,7 @@ window.__api = {
   partnersOf, aiCharSpot, aiJunkCharCell, aiEmptyLand, aiCharCount, aiCharWorth,
   aiTilePlaceable, AI_HOLD_FREE, AI_MAX_CHARS, AI_LEVELS, AIC, setAILevel, aiFlushHand,
   unitCells, unitPos, unitW, boardCount, eachUnit, clearCells, findHeroSpan, isAnchor,
+  hitModeOf, inLine, inCircle, splashByDefender, splashByMarcher, splashByMarcherDuel,
   isAduCell, inspectAt, closeInspect, makeInspect, statAtkOf, rateOf, rangeOf, spdOf, cellStr, spdStr,
   newUnit, fuseUnit, toUnitObject,
   autoFormHeroes, handSlotAt, handIndexAt, boardCellAt, toLogical, onDown, onMove, onUp,
