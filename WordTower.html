@@ -4547,8 +4547,15 @@ function drawRoom(){
 /* ---------------- 文字输入框（HTML 覆盖层） ---------------- */
 let addrInput = null, joinNoInput = null, fRoomInput = null, fPwdInput = null, pwdInput = null;
 let connTimer = null, layoutKey = '';
+/* 输入框里的文字永远是准的：DOM 是唯一真相，点击时直接读，
+   不依赖 input 事件有没有触发（自动填充、输入法、脚本改值都可能不发事件） */
+function inputVal(el, fallback){
+  const v = (el && typeof el.value === 'string') ? el.value.trim() : '';
+  if (v) return v;                      // 框里有字就以框里为准（不依赖 input 事件有没有发过）
+  return (fallback || '').trim();        // 框里是空的：可能是直接改了内存值，退回去用它
+}
 function makeNetInputs(){
-  const mk = (ph, onIn) => {
+  const mk = (ph, onIn, onSubmit) => {
     const el = document.createElement('input');
     el.type = 'text';
     el.placeholder = ph;
@@ -4558,16 +4565,25 @@ function makeNetInputs(){
       'text-align:center;border-radius:12px;padding:0 12px;outline:none;' +
       'font-family:"Songti SC","STSong","SimSun",serif;font-weight:600;' +
       'color:#2b2620;background:rgba(255,255,255,0.94);border:2px solid rgba(90,80,65,0.35);';
-    el.addEventListener('input', () => onIn(el.value));
-    el.addEventListener('keydown', e => { if (e.key === 'Enter') el.blur(); });
+    const sync = () => onIn(el.value);
+    el.addEventListener('input', sync);
+    el.addEventListener('change', sync);
+    el.addEventListener('blur', sync);
+    el.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      sync();
+      if (onSubmit) onSubmit();
+      el.blur();
+    });
     document.body.appendChild(el);
     return el;
   };
-  addrInput  = mk('ws://localhost:8787', v => { NET.addr = v.trim(); scheduleConnect(); });
-  joinNoInput = mk('房间号', v => { NET.joinNo = v.trim(); });
-  fRoomInput = mk('房间号', v => { NET.formRoom = v.trim(); });
-  fPwdInput  = mk('密码（可留空）', v => { NET.formPwd = v.trim(); });
-  pwdInput   = mk('房间密码', v => { NET.tmpPwd = v.trim(); });
+  addrInput  = mk('ws://localhost:8787', v => { NET.addr = v.trim(); scheduleConnect(); },
+                  () => { if (NET.screen === 'online') netConnect(); });
+  joinNoInput = mk('房间号', v => { NET.joinNo = v.trim(); }, () => screenButton('joinByNo'));
+  fRoomInput = mk('房间号', v => { NET.formRoom = v.trim(); }, () => screenButton('doCreate'));
+  fPwdInput  = mk('密码（可留空）', v => { NET.formPwd = v.trim(); }, () => screenButton('doCreate'));
+  pwdInput   = mk('房间密码', v => { NET.tmpPwd = v.trim(); }, () => screenButton('doJoinPwd'));
   addrInput.value = NET.addr;
 }
 /* 改地址时别每敲一个字符就重连，停下来再连 */
@@ -4642,6 +4658,8 @@ function netAutoConnect(){
   netConnect();
 }
 function netConnect(){
+  NET.addr = inputVal(addrInput, NET.addr) || 'ws://localhost:8787';
+  if (addrInput && addrInput.value !== NET.addr) addrInput.value = NET.addr;
   netClose();
   NET.link = 'connecting'; NET.status = '连接中…';
   let ws;
@@ -4682,6 +4700,9 @@ function netOnMessage(m){
   }
   if (m.t === 'created' || m.t === 'joined'){
     NET.waitT = 0; NET.panelMsg = ''; NET.panelBad = false;
+    NET.joinNo = ''; NET.joinName = ''; NET.tmpPwd = '';    // 用掉了就清掉，别带到下一间房
+    if (joinNoInput) joinNoInput.value = '';
+    if (pwdInput) pwdInput.value = '';
     NET.room = m.room;
     NET.role = m.t === 'created' ? 'host' : 'guest';
     NET.peer = !!m.peer;
@@ -4865,7 +4886,8 @@ function screenButton(id){
   if (id === 'leaveLobby'){ netClose(); NET.link = 'idle'; NET.status = '已断开'; showScreen('online'); return; }
   if (id === 'refresh'){ netSend({ t:'list' }); return; }
   if (id === 'openCreate'){
-    NET.panel = 'create'; NET.formRoom = NET.formPwd = ''; NET.formPriv = false;
+    NET.panel = 'create'; NET.formPriv = false;
+    NET.formRoom = ''; NET.formPwd = '';
     NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0;
     if (fRoomInput) fRoomInput.value = '';
     if (fPwdInput) fPwdInput.value = '';
@@ -4877,8 +4899,12 @@ function screenButton(id){
     if (pwdInput) pwdInput.value = ''; return;
   }
   if (id === 'doCreate'){
-    const nm = (NET.formRoom || '').trim();
-    if (!nm){ NET.panelMsg = '请先填房间号'; NET.panelBad = true; return; }
+    NET.formRoom = inputVal(fRoomInput, NET.formRoom);
+    NET.formPwd  = inputVal(fPwdInput, NET.formPwd);
+    /* 名字只填在大厅底部那个框里也算数，别让人白填一遍 */
+    if (!NET.formRoom) NET.formRoom = inputVal(joinNoInput, NET.joinNo);
+    const nm = NET.formRoom;
+    if (!nm){ NET.panelMsg = '请先填房间号（面板上方的输入框）'; NET.panelBad = true; return; }
     if (!netReady()){ NET.panelMsg = '还没连上服务器 · 返回上一页重新连接'; NET.panelBad = true; return; }
     const sent = netSend({ t:'create', room:nm, pwd:(NET.formPwd || '').trim(), priv:NET.formPriv });
     if (!sent){ NET.panelMsg = '发送失败 · 连接已断开'; NET.panelBad = true; return; }
@@ -4886,14 +4912,16 @@ function screenButton(id){
     return;
   }
   if (id === 'doJoinPwd'){
+    NET.tmpPwd = inputVal(pwdInput, NET.tmpPwd);
     if (!netReady()){ NET.panelMsg = '连接已断开'; NET.panelBad = true; return; }
-    netSend({ t:'join', room:NET.joinName, pwd:(NET.tmpPwd || '').trim() });
+    netSend({ t:'join', room:NET.joinName, pwd:NET.tmpPwd });
     NET.panelMsg = '加入中…'; NET.panelBad = false; NET.waitT = 4;
     NET.panel = ''; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = '';
     return;
   }
   if (id === 'joinByNo'){
-    const nm = (NET.joinNo || '').trim();
+    NET.joinNo = inputVal(joinNoInput, NET.joinNo);
+    const nm = NET.joinNo;
     if (!nm){ toast('先填房间号'); return; }
     if (!netReady()){ toast('连接已断开'); return; }
     const rm = NET.rooms.find(r => r.name === nm);
