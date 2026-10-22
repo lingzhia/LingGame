@@ -1360,12 +1360,6 @@ function startWave(early){
   G.waveT = 0;
   // 开战的同时放行上一波之间攒下的待命兵：它们跟着这一波一起压上去
   const freed = releaseQueue();
-  /* 联机：没有电脑波次，也没有商店（商店会冻结时间，两边进店时机不同就脱节）。
-     「波」在这里只剩一个作用 —— 定期放行排队中的待命兵。 */
-  if (NET.pvp){
-    if (freed) toast('第 ' + G.wave + ' 批 · 待命 ' + freed + ' 兵出击');
-    return;
-  }
   // 注意：这里**不能**把征兵费重置回 5 —— 原来就是这一行让成本涨不上去的。
   // 现在征兵费只升不降：开局 5，每征一次 +1，越到后期越贵。
   if (G.passive.luoyang) handAdd({ kind:'shovel' });
@@ -1382,23 +1376,38 @@ function startWave(early){
   G.spawnQueue = []; G.spawnLeft = count; G.spawnGap = gap;
   G.aiSpawnQueue = []; G.aiSpawnLeft = count; G.aiSpawnGap = gap;
   for (let i=0;i<count;i++){
-    G.spawnQueue.push(enemySpec(n));
-    G.aiSpawnQueue.push(enemySpec(n));
+    G.spawnQueue.push(enemySpec(n, i, 0));
+    G.aiSpawnQueue.push(enemySpec(n, i, 1));
   }
   toast('第 ' + n + ' 波 · 双方同时开战（' + lv + ' 阶兵）'
         + (early ? ' · 速清提前' : '')
         + (freed ? ' · 待命 ' + freed + ' 兵随军出击' : ''));
-
+  /* 速清提前开波：单机是「任一方清干净了两边一起开」。联机里两边各自判断，
+     会各开各的 —— 波号一分叉，第 N 波的兵强度就对不上了。所以谁提前开就告诉对面。 */
+  if (early && NET.pvp) netSend({ k:'wave', n });
+  /* 联机唯一不开的是商店：开店会让本端时间整个冻住，对面却还在跑，
+     两边波次就错开了（兵种由种子决定，波号一错两边来的兵就不一样强）。 */
+  if (NET.pvp) return;
   // 商人随奇数波而至：第 3、5、7… 波开波前出现（第 1、2 波不来）。
   // 开店时 step 会整帧冻结，所以这一波实际上是从「买完之后」才开始出兵。
   if (n >= 3 && n % 2 === 1) openShop();
 }
 
 /* 一波里出什么兵：四个基础兵，权重从「刀枪为主」慢慢过渡到「四兵混编」。
-   强度不在这里调 —— 那是 waveTier / MARCH_SCALE 的事。 */
-function enemySpec(n){
+   强度不在这里调 —— 那是 waveTier / MARCH_SCALE 的事。
+   随机源：单机没种子 → 真随机（跟以前一样）；联机有种子 → 由 (波次, 序号, 线)
+   直接算出来。这样两端各跑各的，同一波第 i 个兵一定是同一个兵，不靠时序。 */
+function waveRnd(n, i, salt){
+  let x = (fixedSeed >>> 0) ^ Math.imul(n + 1, 0x9e3779b1)
+        ^ Math.imul(i + 1, 0x85ebca6b) ^ Math.imul(salt + 1, 0xc2b2ae35);
+  x = Math.imul(x ^ (x >>> 15), 0x2545f491);
+  x ^= x >>> 13;
+  return ((x >>> 0) % 100003) / 100003;
+}
+function enemySpec(n, i, salt){
   const lv = waveTier(n);
-  const r = Math.random();
+  const seeded = (fixedSeed !== null && fixedSeed !== undefined);
+  const r = seeded ? waveRnd(n, i | 0, salt | 0) : Math.random();
   let key;
   if (n <= 2)      key = r < 0.55 ? 'dao' : (r < 0.85 ? 'qiang' : (r < 0.95 ? 'gong' : 'qi'));
   else if (n <= 5) key = r < 0.34 ? 'dao' : (r < 0.62 ? 'qiang' : (r < 0.84 ? 'gong' : 'qi'));
@@ -2050,15 +2059,18 @@ const castSkill = castHeroSkill;          // 旧名字保留，别处还在用
 /* ============================================================
    我方冲阵兵（对攻）
    ============================================================ */
-/* 追加 n 个兵到某一侧的进攻队列：'down' 是敌军打我，'up' 是我打电脑 */
+/* 追加 n 个兵到某一侧的进攻队列：'down' 是敌军打我，'up' 是我打对面。
+   联机：'up' 本地照样生成（走给玩家看的那一份），真正算账的是对面，
+   所以同时告诉对面「n 个兵过来了」，对面把它当成来兵生成并结算。 */
 function sendAttack(side, n){
-  if (NET.pvp) return;        // 联机没有自动派兵：出兵只能玩家自己点
   if (side === 'down'){
+    if (NET.pvp) return;        // 联机没有电脑，对面要来兵由对面自己攒战功
     G.spawnLeft += n;
     if (G.spawnGap <= 0) G.spawnGap = 0.30;
   } else {
     G.aiSpawnLeft += n;
     if (G.aiSpawnGap <= 0) G.aiSpawnGap = 0.30;
+    if (NET.pvp) netSend({ k:'atk', n });
   }
 }
 
@@ -2558,22 +2570,22 @@ function step(dt){
   if (G.aiShield > 0) G.aiShield -= dt;
 
   // 下半场出兵：敌军从下半场的敌军出生点下来打我方主公
-  // 联机：对面不会自动派兵，所有来兵都是对方玩家点出来的（raid 事件），本地绝不凭空生兵
-  if (!NET.pvp && G.spawnLeft > 0){
+  // 联机里这批「敌军」就是对面玩家那边的进攻兵 —— 兵种由同一个种子决定，两端一模一样
+  if (G.spawnLeft > 0){
     G.spawnGap -= dt;
     if (G.spawnGap <= 0){
       G.spawnGap = spawnGapOf(G.wave);
       G.spawnLeft--;
-      spawnWave('ai', G.spawnQueue.pop() || enemySpec(G.wave));
+      spawnWave('ai', G.spawnQueue.pop() || enemySpec(G.wave, 90, 0));
     }
   }
   // 上半场出兵：我军从上半场的敌军出生点上去打电脑的主公
-  if (!NET.pvp && G.aiSpawnLeft > 0){
+  if (G.aiSpawnLeft > 0){
     G.aiSpawnGap -= dt;
     if (G.aiSpawnGap <= 0){
       G.aiSpawnGap = spawnGapOf(G.wave);
       G.aiSpawnLeft--;
-      spawnWave('me', G.aiSpawnQueue.pop() || enemySpec(G.wave));
+      spawnWave('me', G.aiSpawnQueue.pop() || enemySpec(G.wave, 91, 1));
     }
   }
   // 到点就开下一批，不看上批是否还在场上；
@@ -4840,11 +4852,22 @@ function netOnGame(d){
   if (!d) return;
   if (d.k === 'ready'){ NET.peerReady = true; toast('对手已准备'); return; }
   if (d.k === 'start'){ pvpStart(d.seed, false); return; }
+  if (d.k === 'wave'){ netApplyWave(d.n); return; }
   if (d.k === 'again'){ gotoRoom(false); return; }   // 对面点了再来一局，一起回等候室
   if (!NET.pvp) return;
   if (d.k === 'side') netApplySide(d);
   else if (d.k === 'raid') netApplyRaid(d);
+  else if (d.k === 'atk'){                                 // 对面战功满的突击队压过来了
+    G.spawnLeft += Math.max(0, Math.min(12, d.n | 0));
+    if (G.spawnGap <= 0) G.spawnGap = 0.30;
+  }
   else if (d.k === 'over') netApplyOver(d.winner);
+}
+/* 对面速清提前开了一波：跟上，别让两边波号分叉（兵种是按波号算的） */
+function netApplyWave(n){
+  if (!NET.pvp || typeof n !== 'number') return;
+  if (G.phase !== 'battle') return;
+  if (n === G.wave + 1) startWave(false);
 }
 /* 同一间房里再来一局：不清连接、不清房间，只把对局状态推倒重来，回到等候室。
    bcast=true 表示是自己点的（要通知对面），false 表示收到了对面的通知。 */
