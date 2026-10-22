@@ -341,7 +341,7 @@ const TIER = [
   /* 血/攻每阶 ×1.8（1→1.8→3.24→5.83→10.5）、攻速每阶 ×1.5（1→1.5→2.25→3.4→5.1）：
    升阶就是「质变」。同阶互拼时间每阶缩短约 1/3（DPS 涨 2.7 倍、血只涨 1.8 倍），
    跨阶压制主要靠攻速滚出来 —— 5 阶满级 DPS ≈ 1 阶的 53 倍。 */
-  { n:'卒', c:'#6b6357', bg:'#efeade', bd:'#a89c86', bar:'#a89c86', hpMul:1.00, atkMul:1.00, rateMul:1.00 },
+  { n:'卒', c:'#453f36', bg:'#ddd4c4', bd:'#8a7f6d', bar:'#8a7f6d', hpMul:1.00, atkMul:1.00, rateMul:1.00 },
   { n:'士', c:'#22643a', bg:'#d9eedd', bd:'#4c9a62', bar:'#3f8a55', hpMul:1.80, atkMul:1.80, rateMul:1.50 },
   { n:'校', c:'#1c4f8c', bg:'#d8e9fb', bd:'#3d7cc2', bar:'#2f6cb0', hpMul:3.24, atkMul:3.24, rateMul:2.25 },
   { n:'尉', c:'#5c2c86', bg:'#e8d9f8', bd:'#8850bb', bar:'#7740ab', hpMul:5.83, atkMul:5.83, rateMul:3.38 },
@@ -3509,7 +3509,6 @@ function drawMarchers(v, foeHalf){
     const mine = e.owner === 'me';
     const s = e.w;
     const edge = mine ? GOLD : SEAL;
-    const ink  = mine ? '#8a5a06' : SEAL;
     ctx.save();
     ctx.globalAlpha = fade;
     ctx.translate(e.x + (e.jit || 0), e.y + (e.jit || 0)*0.45);
@@ -3534,10 +3533,15 @@ function drawMarchers(v, foeHalf){
       ctx.closePath(); ctx.fill();
       ctx.globalAlpha = fade;
     }
-    ctx.fillStyle = e.hurt > 0.35 ? (mine ? '#f0e2c4' : '#e8c9c4') : (mine ? '#fdf3d6' : '#faeae7');
+    // 盘面按「品阶」上色（和棋盘上的守军、手牌同一套），
+    // 外面再套一圈阵营色 —— 一眼既分敌我又分几阶。
+    const tier = TIER[clamp(e.level || 1, 1, MAX_TIER)];
+    ctx.fillStyle = e.hurt > 0.35 ? tier.bd : tier.bg;
     ctx.beginPath(); ctx.arc(0, 0, s*0.5, 0, Math.PI*2); ctx.fill();
-    ctx.strokeStyle = edge; ctx.lineWidth = 2.4; ctx.stroke();
-    ctx.fillStyle = ink;
+    ctx.strokeStyle = tier.bd; ctx.lineWidth = 2.4; ctx.stroke();
+    ctx.strokeStyle = edge; ctx.lineWidth = 2.2;
+    ctx.beginPath(); ctx.arc(0, 0, s*0.5 + 3.2, 0, Math.PI*2); ctx.stroke();
+    ctx.fillStyle = tier.c;
     ctx.font = Math.round(s*0.58) + 'px ' + FONT;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(e.char, 0, 1);
