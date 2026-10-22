@@ -802,6 +802,7 @@ function newGame(){
     result:null,
     bondOn:{},
     enBoard:new Array(COLS*ROWS).fill(null),   // 电脑对手的布阵（上半场）
+    enOut:[],               // 联机：对面派上路的兵（格索引 + 是否排队），只用来画
     // 电脑对手按玩家同一套规则运行：馒头只来自杀敌、一次刷新 5 格手牌、同种升阶（等级可差 1 阶，异字合成默认关闭）
     ai:{ mantou:8, cost:5, merit:0, meritNeed:21, hand:[], t:0, kills:0, passive:{}, actives:[] },
     aiBondOn:{}, aiShield:0,
@@ -3301,6 +3302,24 @@ function withView(v, fn){
 const SEAM_Y = (MID1 + MID2) / 2;
 const inFoeHalf = y => y < SEAM_Y;
 
+/* 对面派上路的兵（联机）：他的格索引镜像到我这块敌人棋盘上画个记号。
+   兵一拖到路上就不在 G.board 里了，不对面报一份，右上角就永远是一块空盘。 */
+function drawFoeOut(v){
+  const list = (NET.pvp && Array.isArray(G.enOut)) ? G.enOut : null;
+  if (!list || !list.length) return;
+  for (const e of list){
+    const idx = mirrorCell(e.c | 0);
+    if (!(idx >= 0 && idx < COLS * ROWS)) continue;
+    const cx = BX + colOf(idx) * CELL + CELL / 2;
+    const cy = v.wy0 + rowOf(idx) * CELL + CELL * 0.46;
+    ctx.beginPath(); ctx.arc(cx, cy, CELL * 0.24, 0, Math.PI * 2);
+    if (e.q){                    // 还在出兵口后面排着队
+      ctx.strokeStyle = 'rgba(176,58,46,0.70)'; ctx.lineWidth = 2; ctx.stroke();
+    } else {                     // 已经上路了
+      ctx.fillStyle = 'rgba(176,58,46,0.80)'; ctx.fill();
+    }
+  }
+}
 /* 画一整块战场：底盘 + 守军 + 主公 + 路上的兵 + 特效 */
 function drawBoardIn(v, mine){
   withView(v, function(){
@@ -3313,6 +3332,7 @@ function drawBoardIn(v, mine){
             mine ? G.myMax  : G.enMax, mine);
     drawInspectMark(mine);              // 注意传布尔：drawInspectMark 内部按布尔比对
     drawMarchers(v, !mine);
+    if (!mine) drawFoeOut(v);           // 对面派上路的兵（联机才有）
     drawFx(v, !mine);
   });
 }
@@ -3515,8 +3535,11 @@ function drawEnemyPanel(){
   drawLifeRow(R.x + 82, cy, G.enLife, G.enMax, SEAL);
   let guard = guardCount(G.enBoard), out = 0;
   for (const m of G.marchers) if (m.owner === 'me' && !m.queued) out++;
+  // 对面派上路的兵：排队 + 行军，让「他正在出兵」这件事在右上角看得见
+  const foeOut = (NET.pvp && Array.isArray(G.enOut)) ? G.enOut.length : 0;
   ctx.fillStyle = INK3; ctx.font = '12px ' + FONT; ctx.textAlign = 'right';
-  ctx.fillText('守 ' + guard + ' · 我军出击 ' + out, R.x + R.w - 20, cy);
+  ctx.fillText('守 ' + guard + ' · 我军出击 ' + out + (foeOut ? ' · 对手出兵 ' + foeOut : ''),
+               R.x + R.w - 20, cy);
 }
 
 /* ---------------- 敌军放大视图（盖住上 2/3） ---------------- */
@@ -4977,6 +5000,15 @@ function netApplyOver(winner){
 /* 把自己这一侧的盘面推给对面（操作后立刻推一次，平时 0.4s 补一次） */
 function netPushSide(){
   if (!NET.pvp || !NET.ws || NET.ws.readyState !== 1) return;
+  /* 我派上路的兵（排队 + 行军）也要一起报过去 —— 否则对面右上角永远只看到
+     一块空棋盘：兵拖到路上就不再属于 G.board 了，对方根本看不到我在出兵。 */
+  const out = [];
+  for (const m of G.marchers){
+    if (m.owner !== 'me') continue;
+    const col = clamp(Math.floor((m.x - BX) / CELL), 0, COLS - 1);
+    const row = clamp(Math.floor((m.y - Y_MINE) / CELL), 0, ROWS - 1);
+    out.push({ c: row * COLS + col, q: m.queued ? 1 : 0 });
+  }
   netSend({
     k:'side',
     board: G.board,
@@ -4985,6 +5017,7 @@ function netPushSide(){
     mantou: G.mantou,
     lives: G.myLife,
     max: G.myMax,
+    out,
   });
 }
 /* 收到对面盘面：镜像到自己的敌方棋盘 */
@@ -5006,6 +5039,7 @@ function netApplySide(d){
   if (typeof d.mantou === 'number') G.ai.mantou = d.mantou;
   if (typeof d.lives === 'number') G.enLife = d.lives;
   if (typeof d.max === 'number') G.enMax = d.max;
+  G.enOut = Array.isArray(d.out) ? d.out : [];      // 对方派上路的兵（只用来画）
   refreshAiBonds();
 }
 /* 对手把兵派上路：在镜像格上生成一个敌方行军兵 */
@@ -5449,11 +5483,46 @@ function resize(){
 }
 
 let last = 0;
+/* 原来这里是「dt 超过 50ms 就砍成 50ms」：一掉帧，游戏时间就比真实时间慢，而且永远补不回来。
+   联机是各跑各的模拟，两端帧率不一样，时间轴就一路差下去 ——
+   一个窗口被挡住，浏览器把它的刷新率压到 1fps，那一局就变成慢动作，两边看到的自然对不上。
+   现在改成：真实过了多久就推进多久，只是切成一帧不超过 50ms 的小步（精度不变，总时间跟上）。
+   正常 60fps 时 dt=16.7ms，一步都不多，跟以前完全一样。 */
+const SIM_CHUNK = 0.05;
+function simAdvance(dtReal){
+  let left = dtReal, guard = 0;
+  while (left > 0.0001 && guard++ < 60){
+    const d = Math.min(left, SIM_CHUNK);
+    step(d);
+    left -= d;
+  }
+}
+/* 页面切到后台时浏览器会把 requestAnimationFrame 掐掉（或压到 1fps）。
+   联机对局不能因此停摆，所以不可见时改用 setTimeout 接着驱动。 */
+let bgTimer = null, rafPending = false;
+function nextFrame(){
+  if (document.visibilityState === 'visible'){
+    if (rafPending) return;                  // 已经排了一帧，别重复驱动
+    rafPending = true;
+    requestAnimationFrame(ts => { rafPending = false; loop(ts); });
+  } else if (!bgTimer){
+    bgTimer = setTimeout(() => { bgTimer = null; loop(performance.now()); }, 400);
+  }
+}
+/* 回到前台：把驱动交回 rAF（后台那段是 setTimeout 顶着的，时间没丢） */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (!bgTimer) return;                      // 一直是 rAF 在跑，不用管
+  clearTimeout(bgTimer); bgTimer = null;
+  last = performance.now();                  // 别拿旧时间戳算 dt
+  nextFrame();
+});
 function loop(ts){
   if (!last) last = ts;
   let dt = (ts - last) / 1000;
   last = ts;
-  if (dt > 0.05) dt = 0.05;
+  if (!(dt > 0)) dt = 0;
+  if (dt > 2) dt = 2;                      // 离开很久（切回来）：最多补 2 秒
   if (NET.screen !== 'game'){
     if (G.toastT > 0) G.toastT -= dt;                       // 菜单屏的提示也要淡出
     if (NET.waitT > 0){                                     // 建/加房间等回包，超时就明说
@@ -5468,18 +5537,18 @@ function loop(ts){
       if (NET.listT <= 0){ NET.listT = 2; netSend({ t:'list' }); }
     }
     layoutNetInputs();
-    draw(); requestAnimationFrame(loop); return;
+    draw(); nextFrame(); return;
   }
-  if (G.paused){ draw(); requestAnimationFrame(loop); return; }   // 暂停：全局冻结，只重绘
+  if (G.paused){ draw(); nextFrame(); return; }   // 暂停：全局冻结，只重绘
   G.t += dt;
-  step(dt);
+  simAdvance(dt);
   if (NET.pvp){ NET.pushT -= dt; if (NET.pushT <= 0){ NET.pushT = 0.4; netPushSide(); } netCheckOver(); }
   if (G.toastT > 0) G.toastT -= dt;
   if (G.aduShield > 0) G.aduShield -= dt;
   if (G.aduHurtM > 0) G.aduHurtM -= dt;
   if (G.aduHurtE > 0) G.aduHurtE -= dt;
   draw();
-  requestAnimationFrame(loop);
+  nextFrame();
 }
 
 function boot(){
