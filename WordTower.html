@@ -1360,6 +1360,7 @@ function startWave(early){
   G.wave++;
   G.waveT = 0;
   // 开战的同时放行上一波之间攒下的待命兵：它们跟着这一波一起压上去
+  G.qReleased = false;                 // 联机：raid 迟到兜底的判定标记
   const freed = releaseQueue();
   // 注意：这里**不能**把征兵费重置回 5 —— 原来就是这一行让成本涨不上去的。
   // 现在征兵费只升不降：开局 5，每征一次 +1，越到后期越贵。
@@ -1522,6 +1523,7 @@ function ownPathSpeedMul(m){
 }
 /* 开战：所有待命兵一起放行 */
 function releaseQueue(){
+  G.qReleased = true;
   let n = 0;
   for (const m of G.marchers){
     if (!m.queued) continue;
@@ -1657,34 +1659,30 @@ function damageMarcher(m, d, killer){
   m.hp -= d; m.hurt = 1; m.flash = 0.25;
   if (m.hp <= 0) killMarcher(m, killer);
 }
-/* 两个行军兵迎面撞上：谁也不能过去，各打各的，死一个才放行 */
+/* 两个行军兵迎面撞上：谁也不能过去，各打各的，死一个才放行。
+   平局裁决用坐标而不是数组顺序 —— 两端 marchers 的先后可能不同（raid 到达顺序），
+   目标选择必须只依赖两端一致的量（位置），否则多兵混战会各打各的目标。 */
 function nearestFoeMarcher(m, r){
   let best = null, bd = r;
   for (const o of G.marchers){
     if (o === m || o.hp <= 0 || o.owner === m.owner) continue;
     const d = Math.hypot(o.x - m.x, o.y - m.y);
-    if (d <= bd){ bd = d; best = o; }
+    if (d > bd + 1e-6) continue;
+    if (best && d > bd - 1e-6){
+      // 距离打平：按 y 再按 x 定序，两端得到同一个目标
+      if (o.y > best.y + 1e-6 || (Math.abs(o.y-best.y) <= 1e-6 && o.x >= best.x)) continue;
+    }
+    bd = d; best = o;
   }
   return best;
 }
-function strikeMarcher(m, foe){
-  if (m.cd > 0) return;
-  m.cd = 1 / Math.max(0.3, m.rate);
-  let d = m.atk * atkMulOf(m.owner);
-  if (m.vs && m.vs.indexOf(foe.key) >= 0) d *= 1.6;
-  burst(foe.x, foe.y, 2, colorOf(m.owner));
-  damageMarcher(foe, d, m.owner);
-  // 穿刺 / 范围：顺带把同一方向或同一圈里的其它敌兵一起打
-  const mode = hitModeOf(m);
-  if (mode !== 'single'){
-    const extra = splashByMarcherDuel(m, foe);
-    for (const o of extra){
-      let de = m.atk * atkMulOf(m.owner);
-      if (m.vs && m.vs.indexOf(o.key) >= 0) de *= 1.6;
-      damageMarcher(o, de, m.owner);
-    }
-    if (extra.length) fxHit(mode, m.x, m.y, foe.x, foe.y, m.range + RANGE_PAD, colorOf(m.owner));
-  }
+/* 对撞专用扣血：不看到 owner。对撞由两端用同一套输入各自结算一遍，
+   两边必然得到同一个结果（同时出手 → 同归于尽就是同归于尽），
+   所以打在 ghost 身上的这份伤害是安全的 —— 它和对面的权威副本数值一致。 */
+function damageMarcherDuel(m, d, killer){
+  if (!m || m.hp <= 0) return;
+  m.hp -= d; m.hurt = 1; m.flash = 0.25;
+  if (m.hp <= 0) killMarcher(m, killer);
 }
 /* 行军兵打对面棋盘上的守军 */
 function strikeDefender(m, tgt){
@@ -1714,6 +1712,37 @@ const DUEL_R = 46;
 /* 行军兵的统一主循环：两边的兵走同一套逻辑，只有方向与结算系数不同。
    推进优先级：迎面有敌兵 > 贴脸守军 > 射程内守军（边打边走）> 全速推进 */
 function updateMarchers(dt){
+  /* ---- 迎面对撞：先全员选目标，再同时出手，最后统一扣血 ----
+     「同时出手」是对撞成立的关键：同一帧里双方互相打出的伤害一起生效，
+     同归于尽就是同归于尽 —— 结果和遍历顺序无关，单机联机、两端各自模拟都一致。
+     联机下我派出去的兵照样参与对撞：这份伤害两端各算一遍、输入完全相同
+     （位置确定、被动已同步、无随机数），必然分毫不差。 */
+  for (const m of G.marchers){
+    m._duel = null;
+    if (m.hp <= 0 || m.stun > 0) continue;
+    m._duel = nearestFoeMarcher(m, DUEL_R);
+  }
+  const strikes = [];
+  for (const m of G.marchers){
+    const foe = m._duel;
+    if (!foe || m.cd > 0) continue;
+    m.cd = 1 / Math.max(0.3, m.rate);
+    let d = m.atk * atkMulOf(m.owner);
+    if (m.vs && m.vs.indexOf(foe.key) >= 0) d *= 1.6;
+    strikes.push({ m, foe, d, extra: splashByMarcherDuel(m, foe), mode: hitModeOf(m) });
+  }
+  for (const s of strikes){
+    burst(s.foe.x, s.foe.y, 2, colorOf(s.m.owner));
+    damageMarcherDuel(s.foe, s.d, s.m.owner);
+    for (const o of s.extra){          // 穿刺 / 范围：顺带把圈里线上的其它敌兵一起打
+      let de = s.m.atk * atkMulOf(s.m.owner);
+      if (s.m.vs && s.m.vs.indexOf(o.key) >= 0) de *= 1.6;
+      damageMarcherDuel(o, de, s.m.owner);
+    }
+    if (s.mode !== 'single')
+      fxHit(s.mode, s.m.x, s.m.y, s.foe.x, s.foe.y, s.m.range + RANGE_PAD, colorOf(s.m.owner));
+  }
+
   for (let i = G.marchers.length-1; i >= 0; i--){
     const m = G.marchers[i];
     m.born += dt;
@@ -1727,13 +1756,13 @@ function updateMarchers(dt){
     if (m.cd < -0.4) m.cd = -0.4;
 
     // 1) 对面也有兵在同一条路上 -> 迎面顶住，必须打死对方才能继续前进
-    /* 联机：我派出去的兵只在本机「走给人看」——
-       打谁、掉多少血、扣几条命，全部由对面当作「我这半场的来兵」算完再推回来。
-       本地要是也打一套，两边各算一遍必然对不上（这边打死了、那边还满血）。
-       所以 ghost 兵不索敌、不出手、到终点也不扣命。 */
+    //    （伤害在上面「同时出手」那一步已经结算过了；这里只负责站住不动）
+    if (m._duel) continue;
+
+    // 联机：我派出去的兵只在本机「走给人看」—— 打守军、掉血、扣命都由对面
+    // 当作「我这半场的来兵」算完再呈现；本地只保留对撞（两端同输入同结果）。
+    // 所以 ghost 兵不索敌守军、不出手打守军、到终点也不扣命。
     const ghost = NET.pvp && m.owner === 'me';
-    const duel = ghost ? null : nearestFoeMarcher(m, DUEL_R);
-    if (duel){ strikeMarcher(m, duel); continue; }
 
     // 2) 路上有守军顶着脸 -> 原地厮杀（拦停靠的是「路上的兵」，路外的兵不挡路）
     const defMine = m.owner === 'ai';        // 我要打的是对面那块棋盘上的守军
@@ -5018,6 +5047,7 @@ function netPushSide(){
     lives: G.myLife,
     max: G.myMax,
     out,
+    pas: G.passive,      // 被动也要报：对撞伤害两端各算一遍，攻加成不一致就会分叉
   });
 }
 /* 收到对面盘面：镜像到自己的敌方棋盘 */
@@ -5044,6 +5074,7 @@ function netApplySide(d){
     G.aiUnlocked = unl;
   }
   if (typeof d.mantou === 'number') G.ai.mantou = d.mantou;
+  if (d.pas) G.ai.passive = d.pas;                   // 对面的被动道具（兵书攻加成等）
   if (typeof d.lives === 'number') G.enLife = d.lives;
   if (typeof d.max === 'number') G.enMax = d.max;
   G.enOut = Array.isArray(d.out) ? d.out : [];      // 对方派上路的兵（只用来画）
@@ -5057,6 +5088,9 @@ function netApplyRaid(d){
   const idx = mirrorCell(d.cell);
   const m = spawnRaider('ai', idx, d.type, d.level);
   if (m) m.queued = true;
+  /* 迟到兜底：raid 在出兵口放行那一刻发出，若本端这波已经放行过
+     （消息比 startWave 晚到几毫秒），这支兵会干等一整波 —— 直接放行拉平。 */
+  if (m && G.qReleased) m.queued = false;
 }
 function screenButton(id){
   sfx('click');
@@ -5611,7 +5645,7 @@ window.__api = {
   V_MINI, V_BIG, V_PLAY, BTN_FOLD,
   ensureMyBuffs, ensureBuffs, nearestDefender, nearestMyUnit, nearestAiUnit, killDefender, killMyUnit, hitAdu, startWave,
   sideInfo, castHeroSkill, atkMulOf, defMulOf, foeOf, colorOf,
-  damageMarcher, killMarcher, strikeMarcher, strikeDefender, marchForward, raiderRoute, forwardRoute,
+  damageMarcher, killMarcher, damageMarcherDuel, strikeDefender, marchForward, raiderRoute, forwardRoute,
   HEROES, UNITS, FUSE, TIER, MAX_TIER,
   isPathCell, isRoad, pathList, pathCells, pathPoints, spawnPos, pathAway, cellScore,
   genMap, rollPath, quadOK, applyMap, computeFreeLand,
