@@ -4233,10 +4233,36 @@ function drawPause(){
      - 路上兵（出击兵）用 raid 事件单独同步
    这样不需要每帧同步位置，视觉与手感都不抖；代价是极端情况下两边会有细微偏差。
    ============================================================ */
+/* 联机地址从「你是用什么地址打开这个页面的」推出来 —— 这是第二台设备最容易踩的坑：
+   在服务器那台机器上打开 localhost，默认就该是 ws://localhost:8787；
+   在手机/另一台电脑上用 192.168.x.x 打开，默认就该是 ws://192.168.x.x:8787。
+   一律写死 localhost 的话，第二个客户端连的永远是它自己。 */
+function defaultAddr(){
+  const h = (location.hostname || '').trim();
+  if (!h) return 'ws://localhost:8787';                    // file:// 直接打开
+  const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
+  return proto + h + ':' + (location.port || '8787');
+}
+/* 地址容错：少写 ws://、写成 http://、末尾带斜杠、不带端口 —— 都替人补齐 */
+function normalizeAddr(v){
+  let s = String(v || '').trim();
+  if (!s) return '';
+  s = s.replace(/^https:\/\//i, 'wss://').replace(/^http:\/\//i, 'ws://');
+  if (!/^wss?:\/\//i.test(s)) s = 'ws://' + s;
+  s = s.replace(/\/+$/, '');
+  const host = s.replace(/^wss?:\/\//i, '');
+  if (!/:\d+$/.test(host)) s += ':' + (location.port || '8787');
+  return s;
+}
+/* 这是个回环地址吗（= 只指自己这台机器） */
+function isLoopbackAddr(a){
+  return /^wss?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(String(a || ''));
+}
+
 const NET = {
   screen:'home',        // home | online | lobby | room | game
   pvp:false,            // 是否处于联机对局（已开打）
-  addr:'ws://localhost:8787',
+  addr:'ws://localhost:8787',   // 真实的默认值在 NET.addr = defaultAddr() 里设（见 makeNetInputs）
   room:'',
   role:'',              // host | guest
   ws:null,
@@ -4354,7 +4380,9 @@ function drawOnline(){
   ctx.textAlign = 'left'; ctx.fillStyle = INK2; ctx.font = '20px ' + FONT;
   ctx.fillText('服务器地址', NET_UI.addr.x, NET_UI.addr.y - 26);
   ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
-  ctx.fillText('例：ws://localhost:8787　或　ws://你的公网IP:8787', NET_UI.addr.x, NET_UI.addr.y + 88);
+  ctx.fillText('例：' + defaultAddr() + '（就是你打开本页的地址）', NET_UI.addr.x, NET_UI.addr.y + 88);
+  ctx.fillStyle = 'rgba(90,80,65,0.62)'; ctx.font = '13px ' + FONT;
+  ctx.fillText('另一台设备或另一个浏览器：把 localhost 换成开服那台机器的 IP', NET_UI.addr.x, NET_UI.addr.y + 112);
 
   /* 状态灯：未连接 / 连接中 / 在线 / 连不上 */
   const st = NET.link;
@@ -4604,12 +4632,13 @@ function makeNetInputs(){
     document.body.appendChild(el);
     return el;
   };
-  addrInput  = mk('ws://localhost:8787', v => { NET.addr = v.trim(); scheduleConnect(); },
+  addrInput  = mk('ws://192.168.1.5:8787', v => { NET.addr = v.trim(); scheduleConnect(); },
                   () => { if (NET.screen === 'online') netConnect(); });
   joinNoInput = mk('房间号', v => { NET.joinNo = v.trim(); }, () => screenButton('joinByNo'));
   fRoomInput = mk('房间号', v => { NET.formRoom = v.trim(); }, () => screenButton('doCreate'));
   fPwdInput  = mk('密码（可留空）', v => { NET.formPwd = v.trim(); }, () => screenButton('doCreate'));
   pwdInput   = mk('房间密码', v => { NET.tmpPwd = v.trim(); }, () => screenButton('doJoinPwd'));
+  NET.addr = defaultAddr();              // 按「你是用什么地址打开这个页面」推默认值
   addrInput.value = NET.addr;
 }
 /* 改地址时别每敲一个字符就重连，停下来再连 */
@@ -4726,8 +4755,33 @@ function netAutoConnect(){
   if (NET.ws && NET.ws.readyState === 0) return;
   netConnect();
 }
+/* 连不上时补一句人话：最常见的原因就是第二台设备填了 localhost */
+function addrHint(addr){
+  if (!isLoopbackAddr(addr)) return '';
+  const h = location.hostname || '';
+  if (!h || /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(h)) return '';
+  return ' · localhost 只指你自己这台机器，要填服务器那台的 IP';
+}
+function connFailMsg(addr){ return '连不上 ' + addr + addrHint(addr); }
+/* WS 连不上时，再探一下同一个端口的普通网页：
+   网页能开 → 服务器活着，是这个浏览器把 WebSocket 拦了（代理插件/系统代理最常见）
+   网页也开不了 → 地址填错了，或者不在同一个网段/被防火墙挡了
+   这两件事在界面上长得一模一样，不探一下只能靠猜。 */
+let httpProbeT = 0;
+function probeServer(addr){
+  const now = Date.now();
+  if (now - httpProbeT < 2500) return;
+  httpProbeT = now;
+  const u = addr.replace(/^ws:/i, 'http:').replace(/^wss:/i, 'https:').replace(/\/+$/, '') + '/';
+  fetch(u, { method:'GET', mode:'no-cors', cache:'no-store' })
+    .then(() => { if (NET.link === 'offline')
+      NET.status = '网页能开但 WebSocket 被拦了（' + addr + '）· 查浏览器代理/插件'; })
+    .catch(() => { if (NET.link === 'offline')
+      NET.status = '完全没响应（' + addr + '）· 查 IP 和端口、或防火墙'; });
+}
 function netConnect(){
-  NET.addr = inputVal(addrInput, NET.addr) || 'ws://localhost:8787';
+  const raw = inputVal(addrInput, NET.addr);
+  NET.addr = normalizeAddr(raw) || defaultAddr();
   if (addrInput && addrInput.value !== NET.addr) addrInput.value = NET.addr;
   const addr = NET.addr;
   netClose();
@@ -4753,12 +4807,13 @@ function netConnect(){
   ws.onerror = () => {
     if (NET.ws !== ws || opened) return;       // 已经换了新连接 / 连上之后再报错，交给 onclose
     NET.link = 'offline';
-    scheduleRetry('连不上 ' + addr);
+    probeServer(addr);
+    scheduleRetry(connFailMsg(addr));
   };
   ws.onclose = () => {
     if (NET.ws !== ws) return;
     NET.peer = false;
-    if (!opened){ NET.link = 'offline'; scheduleRetry('连不上 ' + addr); return; }
+    if (!opened){ NET.link = 'offline'; probeServer(addr); scheduleRetry(connFailMsg(addr)); return; }
     NET.link = 'offline';
     if (NET.pvp){
       NET.status = '连接断开';

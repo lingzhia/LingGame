@@ -38,7 +38,11 @@ const httpServer = http.createServer((req, res) => {
     res.end('404 · 只有本目录下的文件可访问');
     return;
   }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+    /* 一定不要缓存：第二台设备/第二个浏览器拿到旧页面，表现就是「一个能连一个连不上」 */
+    'Cache-Control': 'no-store, must-revalidate',
+  });
   fs.createReadStream(file).pipe(res);
 });
 
@@ -244,7 +248,21 @@ httpServer.listen(PORT, () => {
   console.log('');
   console.log('  WordTower 联机服务器已启动');
   console.log('  游戏页面： http://localhost:' + PORT + '/');
-  console.log('  联机地址： ws://localhost:' + PORT + '   （同一局域网的手机/电脑把 localhost 换成这台机器的 IP）');
+  // 把本机 IP 直接列出来：第二台设备/第二个浏览器填错地址，十次有九次是这里
+  const nets = require('os').networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)){
+    for (const ni of nets[name] || []){
+      if (ni.family === 'IPv4' && !ni.internal) ips.push(ni.address);
+    }
+  }
+  if (ips.length){
+    console.log('  联机地址（本机）： ws://localhost:' + PORT);
+    for (const ip of ips) console.log('  联机地址（局域网）： ws://' + ip + ':' + PORT);
+    console.log('  → 另一台设备/手机用「局域网」那条；浏览器打开 http://' + ips[0] + ':' + PORT + '/');
+  } else {
+    console.log('  联机地址： ws://localhost:' + PORT + '   （没找到局域网 IP，可能没联网）');
+  }
   console.log('');
   console.log('  Ctrl+C 结束');
 });
