@@ -1712,6 +1712,7 @@ function updateMarchers(dt){
     if (m.hp <= 0){ G.marchers.splice(i,1); continue; }
     if (m.stun > 0){ m.stun -= dt; continue; }
     let sp = m.spd;
+    if (NET.pvp) sp *= PVP_MARCH_MUL;          // 联机整体提速（两边同系数，影子兵不会走散）
     if (m.slowT > 0){ m.slowT -= dt; sp *= 0.4; }
     m.cd -= dt;
     if (m.cd < -0.4) m.cd = -0.4;
@@ -2411,7 +2412,7 @@ function aiTick(dt){
   // 人类一直是这么打的（手牌随时能丢到路上当免费进攻兵），AI 以前从不这么做，
   // 所以它的进攻能力几乎为零 —— 这是它最大的短板。
   if (AIC().rush && G.phase === 'battle'){
-    const left = WAVE_GAP - G.waveT;
+    const left = waveGapNow() - G.waveT;
     if (left > 0 && left <= 1.6) aiFlushHand();
   }
 }
@@ -2534,6 +2535,15 @@ function updateFx(dt){
    但如果某一方把这一波**提前清干净**了，立刻开下一波（两边一起开，不等另一边）。
    一批的兵力 = 3 + 2×波次（第 1 批 5 个、第 2 批 7 个、第 3 批 9 个……）。 */
 const WAVE_GAP = 26;
+/* 联机一波的间隔。比单人短得多：单人那一波是「电脑从出兵口放兵」，联机只是
+   「把排队待命的兵放出去」，26 秒太久 —— 人拖完兵盯着出兵口，十几秒没动静
+   就会以为坏了。而且两端各自计时，同一个固定间隔最不容易走散。 */
+const PVP_WAVE_GAP = 8;
+function waveGapNow(){ return NET.pvp ? PVP_WAVE_GAP : WAVE_GAP; }
+/* 联机行军速度倍数。人机那 26 秒一波里，兵慢慢走没人管；联机是「你点一下，
+   对方马上要看到反应」——原速走完自家那条路要三十多秒，出兵口半天不出一兵，
+   看着就像坏了。两边乘同一个系数，双端各自的影子兵仍然同步。 */
+const PVP_MARCH_MUL = 4;
 /* 速清提前开波的最短间隔：免得刚开波就「场上没人」→ 无限连刷 */
 const WAVE_EARLY_MIN = 3;
 
@@ -2579,8 +2589,12 @@ function step(dt){
   // 到点就开下一批，不看上批是否还在场上；
   // 另外任一方把这一波的兵清干净了，也立刻开下一波 —— 两边同时开。
   G.waveT += dt;
-  if (G.waveT >= WAVE_GAP) startWave(false);
-  else if (G.waveT >= WAVE_EARLY_MIN && (waveClearedFor(true) || waveClearedFor(false))) startWave(true);
+  /* 联机：没有自动波次，「波」只负责定期放行排队待命的兵，所以用短间隔。
+     速清提前开波在联机里不成立（对面没人就没得清，会变成每 3 秒空开一波，
+     波数一路乱涨），只在单人局里保留。 */
+  if (G.waveT >= waveGapNow()) startWave(false);
+  else if (!NET.pvp && G.waveT >= WAVE_EARLY_MIN
+        && (waveClearedFor(true) || waveClearedFor(false))) startWave(true);
 
   updateMarchers(dt);        // 两边所有的行军兵，一套逻辑
   updateMyUnits(dt);
@@ -3329,7 +3343,7 @@ function drawInfoPanel(){
   // ---- 下一波倒计时 ----
   const line2 = (G.phase === 'prep')
     ? ('备战 ' + Math.ceil(Math.max(0, G.prepT)) + 's')
-    : ('下一波 ' + Math.ceil(Math.max(0, WAVE_GAP - G.waveT)) + 's');
+    : ('下一波 ' + Math.ceil(Math.max(0, waveGapNow() - G.waveT)) + 's');
   ctx.fillStyle = INK2; ctx.font = '14px ' + FONT;
   ctx.fillText(line2, x0, by + 74);
   // 商人预告：偶数波开波前出现
@@ -3341,7 +3355,7 @@ function drawInfoPanel(){
   const barW = x1 - x0, barY = by + 90;
   ctx.fillStyle = 'rgba(90,80,65,0.10)';
   rr(ctx, x0, barY, barW, 6, 3); ctx.fill();
-  const prog = (G.phase === 'prep') ? 0 : clamp(G.waveT / WAVE_GAP, 0, 1);
+  const prog = (G.phase === 'prep') ? 0 : clamp(G.waveT / waveGapNow(), 0, 1);
   if (prog > 0){
     ctx.fillStyle = 'rgba(176,58,46,0.55)';
     rr(ctx, x0, barY, Math.max(4, barW*prog), 6, 3); ctx.fill();
@@ -4708,7 +4722,10 @@ function netClose(){
   NET.rooms = [];
 }
 function netAutoConnect(){
-  if (NET.ws && (NET.ws.readyState === 0 || NET.ws.readyState === 1)) return;
+  if (NET.ws && NET.ws.readyState === 1){        // 已经连着：进来就把灯点亮，别显示「未连接」
+    NET.link = 'online'; NET.status = '服务器在线'; NET.tries = 0; clearRetry(); return;
+  }
+  if (NET.ws && NET.ws.readyState === 0) return;
   netConnect();
 }
 function netConnect(){
@@ -4941,7 +4958,7 @@ function screenButton(id){
 
   /* 首页 / 联机页 */
   if (id === 'solo'){ startSolo(); return; }
-  if (id === 'online'){ NET.link = 'idle'; NET.status = ''; showScreen('online'); return; }
+  if (id === 'online'){ showScreen('online'); return; }
   if (id === 'toHome'){ showScreen('home'); return; }
   if (id === 'enterLobby'){
     if (NET.link !== 'online') { toast('先连上服务器'); return; }
