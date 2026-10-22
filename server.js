@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 /* WordTower 联机转发服务器（零依赖）
  *
- * 作用只有三件：
+ * 职责：
  *   1) 顺手把 WordTower.html 托管出来（手机/另一台电脑直接打开就能玩）
- *   2) 按房间号把两个客户端配成一对（一间房最多 2 人）
+ *   2) 维护房间表：建房 / 大厅列表 / 密码校验 / 隐私房过滤 / 解散
  *   3) 之后只做「转发」：谁发什么就原样丢给同房间的另一人，服务器不碰游戏逻辑
  *
  * 启动：
@@ -76,16 +76,17 @@ httpServer.on('upgrade', (req, socket) => {
   );
   socket.setNoDelay(true);
 
-  const client = { socket, room:'', role:'', alive:true };
+  const client = { socket, room:'', alive:true };
 
   const send = (obj) => {
     if (!client.alive) return;
     try { socket.write(encodeFrame(JSON.stringify(obj))); } catch (e){ /* 对端已断 */ }
   };
   const close = () => {
+    if (!client.alive) return;
     client.alive = false;
     try { socket.destroy(); } catch (e){}
-    leaveRoom(client);
+    leaveRoom(client, 'peerleft');
   };
 
   let buf = Buffer.alloc(0);
@@ -117,44 +118,117 @@ httpServer.on('upgrade', (req, socket) => {
   socket.on('close', close);
 });
 
-/* ---------------- 房间 ---------------- */
-const rooms = new Map();     // room -> { clients:[...] }
+/* ---------------- 房间表 ---------------- */
+/* room -> { name, pwd, priv, started, clients:[client...] }，clients[0] 是房主 */
+const rooms = new Map();
 
-function roomOf(name){
-  let r = rooms.get(name);
-  if (!r){ r = { clients: [] }; rooms.set(name, r); }
-  return r;
-}
-function leaveRoom(client){
-  const r = rooms.get(client.room);
-  if (!r) return;
-  r.clients = r.clients.filter(c => c !== client);
-  for (const c of r.clients) sendTo(c, { t:'peerleft' });
-  if (!r.clients.length) rooms.delete(client.room);
-  client.room = '';
-}
 function sendTo(client, obj){
   if (!client.alive) return;
   try { client.socket.write(encodeFrame(JSON.stringify(obj))); } catch (e){}
 }
+function roomBrief(r){
+  return { name:r.name, locked:!!r.pwd, priv:r.priv, players:r.clients.length };
+}
+function listRooms(){
+  const list = [];
+  for (const r of rooms.values()){
+    if (r.priv) continue;              // 隐私房不进大厅
+    if (r.started) continue;           // 已开打的不给别人进
+    list.push(roomBrief(r));
+  }
+  return list;
+}
+function broadcastList(){
+  const list = listRooms();
+  for (const r of rooms.values()) for (const c of r.clients) sendTo(c, { t:'rooms', list });
+}
+/* 有人离开时通知同房间的其他人；房主离开则整间房解散 */
+function leaveRoom(client, reason){
+  const r = rooms.get(client.room);
+  if (!r){ client.room = ''; return; }
+  const isHost = r.clients[0] === client;
+  r.clients = r.clients.filter(c => c !== client);
+  client.room = '';
+  if (!r.clients.length){
+    rooms.delete(r.name);
+    console.log(`[close] ${r.name} 空房回收`);
+  } else if (isHost){
+    for (const c of r.clients){ sendTo(c, { t:'dissolved', msg:'房主已解散房间' }); c.room = ''; }
+    rooms.delete(r.name);
+    console.log(`[dissolve] ${r.name} 房主离开，房间解散`);
+  } else {
+    for (const c of r.clients) sendTo(c, { t:reason || 'peerleft' });
+    console.log(`[leave] ${r.name} 剩 ${r.clients.length} 人`);
+  }
+  broadcastList();
+}
 
 function onMessage(client, text, send, close){
   let m; try { m = JSON.parse(text); } catch (e){ return; }
-  if (m.t === 'join'){
-    const name = String(m.room || 'default').slice(0, 32);
-    if (client.room) leaveRoom(client);                 // 换房先退出旧房
-    const r = roomOf(name);
-    if (r.clients.length >= 2){ send({ t:'err', msg:'房间已满（一间房只能两人）' }); return; }
-    client.room = name;
-    client.role = m.role === 'host' ? 'host' : 'guest';
-    r.clients.push(client);
-    const peer = r.clients.length === 2;
-    send({ t:'joined', room:name, peer });
-    // 房间里本来已经有人 -> 通知那个人「对手来了」
-    for (const c of r.clients) if (c !== client) sendTo(c, { t:'peer', room:name });
-    console.log(`[join] ${name} role=${client.role} 房内 ${r.clients.length}/2`);
+
+  if (m.t === 'list'){
+    send({ t:'rooms', list:listRooms() });
     return;
   }
+
+  if (m.t === 'create'){
+    const name = String(m.room || '').trim().slice(0, 24);
+    if (!name){ send({ t:'err', msg:'房间号不能为空' }); return; }
+    if (rooms.has(name)){ send({ t:'err', msg:'这个房间号已经有人用了' }); return; }
+    if (client.room) leaveRoom(client, 'peerleft');
+    const r = { name, pwd:String(m.pwd || '').slice(0, 24), priv:!!m.priv, started:false, clients:[client] };
+    rooms.set(name, r);
+    client.room = name;
+    send({ t:'created', room:name, priv:r.priv, locked:!!r.pwd });
+    console.log(`[create] ${name}${r.pwd ? ' · 有密码' : ''}${r.priv ? ' · 隐私房' : ''}`);
+    broadcastList();
+    return;
+  }
+
+  if (m.t === 'join'){
+    const name = String(m.room || '').trim().slice(0, 24);
+    const r = rooms.get(name);
+    if (!r){ send({ t:'err', msg:'房间不存在或已解散' }); return; }
+    if (r.started){ send({ t:'err', msg:'这局已经开始了' }); return; }
+    if (r.clients.length >= 2){ send({ t:'err', msg:'房间已满（一间房只能两人）' }); return; }
+    if (r.pwd && String(m.pwd || '') !== r.pwd){ send({ t:'err', msg:'密码不对' }); return; }
+    if (client.room) leaveRoom(client, 'peerleft');
+    client.room = name;
+    r.clients.push(client);
+    send({ t:'joined', room:name, host:false, peer:r.clients.length === 2 });
+    for (const c of r.clients) if (c !== client) sendTo(c, { t:'peer', room:name });
+    console.log(`[join] ${name} 房内 ${r.clients.length}/2`);
+    broadcastList();
+    return;
+  }
+
+  if (m.t === 'dissolve'){
+    const r = rooms.get(client.room);
+    if (!r) return;
+    if (r.clients[0] !== client){ send({ t:'err', msg:'只有房主能解散' }); return; }
+    for (const c of r.clients) if (c !== client){ sendTo(c, { t:'dissolved', msg:'房主已解散房间' }); c.room = ''; }
+    client.room = '';
+    rooms.delete(r.name);
+    send({ t:'dissolved', msg:'房间已解散' });
+    console.log(`[dissolve] ${r.name} 房主主动解散`);
+    broadcastList();
+    return;
+  }
+
+  if (m.t === 'leave'){
+    leaveRoom(client, 'peerleft');
+    return;
+  }
+
+  if (m.t === 'started'){
+    const r = rooms.get(client.room);
+    if (r && r.clients[0] === client){
+      r.started = true;
+      broadcastList();
+    }
+    return;
+  }
+
   if (m.t === 'relay'){
     const r = rooms.get(client.room);
     if (!r) return;

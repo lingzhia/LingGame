@@ -4070,7 +4070,7 @@ function drawOver(){
   bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
   ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
   ctx.fillStyle = '#fff6ee'; ctx.font = '23px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(NET.pvp ? '返 回 首 页' : '再 战 一 局', W/2, b.y + b.h/2 + 1);
+  ctx.fillText(NET.pvp ? '返 回 大 厅' : '再 战 一 局', W/2, b.y + b.h/2 + 1);
 }
 
 /* ---------------- 暂停面板 ---------------- */
@@ -4165,14 +4165,25 @@ function drawPause(){
    这样不需要每帧同步位置，视觉与手感都不抖；代价是极端情况下两边会有细微偏差。
    ============================================================ */
 const NET = {
-  screen:'home',        // home | online | game
-  pvp:false,            // 是否处于联机对局
+  screen:'home',        // home | online | lobby | room | game
+  pvp:false,            // 是否处于联机对局（已开打）
   addr:'ws://localhost:8787',
   room:'',
   role:'',              // host | guest
   ws:null,
-  status:'',
-  peer:false,
+  status:'',            // 服务器状态文案
+  link:'idle',          // idle | connecting | online | offline
+  rooms:[],             // 大厅房间列表
+  listT:0,              // 大厅轮询计时
+  peer:false,           // 对手是否在房间里
+  ready:false,          // 我方是否已准备（客机）
+  peerReady:false,      // 对手是否已准备（房主视角）
+  panel:'',             // lobby 内的浮层：'' | create | pwd
+  formRoom:'', formPwd:'', formPriv:false,   // 建房表单
+  joinNo:'',            // 大厅底部「输号加入」
+  joinName:'',          // 待输密码的房间
+  tmpPwd:'',            // 密码面板输入
+  pendingRoom:'', pendingRole:'',            // ?net= 直连用
   seed:0,
   seq:0,
   seen:{},              // 已处理的 raid 序号
@@ -4180,7 +4191,16 @@ const NET = {
   started:false,
 };
 let UI_BTNS = [];       // 当前屏幕上可点的按钮（每帧重填）
-const NET_UI = { addr:{ x:80, y:570, w:560, h:64 }, room:{ x:80, y:750, w:560, h:64 } };
+/* 输入框位置（逻辑坐标），按屏幕分别摆放 */
+const NET_UI = {
+  addr:   { x:80, y:496, w:560, h:64 },
+  joinNo: { x:80, y:1216, w:360, h:60 },
+  fRoom:  { x:150, y:528, w:420, h:60 },
+  fPwd:   { x:150, y:640, w:420, h:60 },
+  pwd:    { x:150, y:665, w:420, h:60 },
+};
+/* 大厅浮层的位置写死，输入框坐标按它对齐 */
+const PANEL = { create:{ y:396, h:500 }, pwd:{ y:513, h:340 } };
 
 /* 两块棋盘是「行镜像」：我这边的 (col,row) 在对面就是 (col, 7-row) */
 function mirrorCell(idx){
@@ -4199,7 +4219,7 @@ function drawHome(){
 
   const cards = [
     { id:'solo',   t:'单人模式', d:'与人机对战 · 三档难度可选' },
-    { id:'online', t:'多人模式', d:'真人对战 · 房间号配对' },
+    { id:'online', t:'多人模式', d:'真人 1v1 · 大厅建房开打' },
   ];
   cards.forEach((b, i) => {
     const r = { x:90, y:620 + i*236, w:W-180, h:180 };
@@ -4221,56 +4241,246 @@ function drawHome(){
   ctx.fillText('单人模式为本地存档 · 多人模式需要先启动转发服务器', W/2, H - 100);
 }
 
-/* ---------------- 联机页 ---------------- */
+/* ---------------- 通用按钮 ---------------- */
+/* mode: primary(红实心) | plain(纸白) | off(灰，不可点)，sub 是按钮上的第二行小字 */
+function uiBtn(id, x, y, w, h, t, mode, sub){
+  const off = mode === 'off';
+  if (!off) UI_BTNS.push({ id, r:{ x, y, w, h } });
+  ctx.fillStyle = 'rgba(70,60,45,0.14)';
+  rr(ctx, x+2, y+4, w, h, 14); ctx.fill();
+  const g = ctx.createLinearGradient(0, y, 0, y+h);
+  if (mode === 'primary'){ g.addColorStop(0, '#c0483a'); g.addColorStop(1, '#9e3226'); }
+  else if (off){ g.addColorStop(0, '#e7e1d7'); g.addColorStop(1, '#d8d1c5'); }
+  else { g.addColorStop(0, '#fbf7ef'); g.addColorStop(1, '#eee4d3'); }
+  ctx.fillStyle = g; rr(ctx, x, y, w, h, 14); ctx.fill();
+  ctx.strokeStyle = off ? 'rgba(120,105,80,0.20)'
+    : (mode === 'primary' ? 'rgba(120,40,30,0.35)' : 'rgba(120,105,80,0.32)');
+  ctx.lineWidth = 2; rr(ctx, x, y, w, h, 14); ctx.stroke();
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = mode === 'primary' ? '#fff6ee' : (off ? 'rgba(70,62,50,0.42)' : INK);
+  ctx.font = 'bold 26px ' + FONT;
+  ctx.fillText(t, x + w/2, sub ? y + h/2 - 12 : y + h/2 + 1);
+  if (sub){
+    ctx.font = '15px ' + FONT;
+    ctx.fillStyle = mode === 'primary' ? 'rgba(255,246,238,0.80)' : 'rgba(70,62,50,0.46)';
+    ctx.fillText(sub, x + w/2, y + h/2 + 20);
+  }
+}
+
+/* ---------------- 联机页：只有服务器地址 ---------------- */
 function drawOnline(){
   drawBg(true);
   UI_BTNS = [];
-  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
 
   ctx.fillStyle = INK; ctx.font = 'bold 46px ' + FONT;
-  ctx.textAlign = 'center';
-  ctx.fillText('联 机 对 战', W/2, 210);
+  ctx.fillText('联 机 对 战', W/2, 250);
+  ctx.fillStyle = INK3; ctx.font = '18px ' + FONT;
+  ctx.fillText('填好地址会自动检测服务器', W/2, 312);
 
-  // 地址输入框由 HTML input 覆盖，这里只画标签与说明
-  const label = (t, y) => {
-    ctx.textAlign = 'left'; ctx.fillStyle = INK2; ctx.font = '20px ' + FONT;
-    ctx.fillText(t, NET_UI.addr.x, y);
-  };
-  label('服务器地址', NET_UI.addr.y - 26);
-  label('房间号（两人相同）', NET_UI.room.y - 26);
-  ctx.textAlign = 'left'; ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
-  ctx.fillText('例：ws://localhost:8787　或　ws://你的公网IP:8787', NET_UI.addr.x, NET_UI.addr.y + 86);
+  ctx.textAlign = 'left'; ctx.fillStyle = INK2; ctx.font = '20px ' + FONT;
+  ctx.fillText('服务器地址', NET_UI.addr.x, NET_UI.addr.y - 26);
+  ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+  ctx.fillText('例：ws://localhost:8787　或　ws://你的公网IP:8787', NET_UI.addr.x, NET_UI.addr.y + 88);
 
-  const btns = [
-    { id:'host',  t:'创建房间', x:80,  y:880,  w:270, h:88, primary:true },
-    { id:'join',  t:'加入房间', x:370, y:880,  w:270, h:88, primary:true },
-    { id:'back',  t:'返回',     x:80,  y:1020, w:W-160, h:70, primary:false },
-  ];
-  for (const b of btns){
-    UI_BTNS.push({ id:b.id, r:{ x:b.x, y:b.y, w:b.w, h:b.h } });
-    ctx.fillStyle = 'rgba(70,60,45,0.16)';
-    rr(ctx, b.x+2, b.y+4, b.w, b.h, 14); ctx.fill();
-    const g = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
-    if (b.primary){ g.addColorStop(0, '#c0483a'); g.addColorStop(1, '#9e3226'); }
-    else { g.addColorStop(0, '#fbf7ef'); g.addColorStop(1, '#eee4d3'); }
-    ctx.fillStyle = g; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
-    ctx.fillStyle = b.primary ? '#fff6ee' : INK;
-    ctx.font = 'bold 28px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(b.t, b.x + b.w/2, b.y + b.h/2 + 1);
+  /* 状态灯：未连接 / 连接中 / 在线 / 连不上 */
+  const st = NET.link;
+  const col = st === 'online' ? '#2f7d4f' : st === 'connecting' ? '#b8860b'
+    : st === 'offline' ? SEAL : INK3;
+  const txt = NET.status || '未连接';
+  ctx.beginPath(); ctx.arc(W/2 - 104, 720, 7, 0, Math.PI*2);
+  ctx.fillStyle = col; ctx.fill();
+  ctx.textAlign = 'left'; ctx.fillStyle = col; ctx.font = '20px ' + FONT;
+  ctx.fillText(txt, W/2 - 88, 720);
+  if (st === 'online'){
+    ctx.textAlign = 'center'; ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
+    ctx.fillText('大厅里现在有 ' + NET.rooms.length + ' 个房间等待对手', W/2, 758);
   }
 
-  ctx.textAlign = 'center'; ctx.fillStyle = NET.peer ? '#2f7d4f' : INK3;
-  ctx.font = '20px ' + FONT;
-  ctx.fillText(NET.status || '未连接', W/2, 1170);
+  uiBtn('enterLobby', 80, 860, W-160, 92, '进入大厅',
+    st === 'online' ? 'primary' : 'off', st === 'online' ? '去建房或找房间' : '先连上服务器');
+  uiBtn('toHome', 80, 984, W-160, 70, '返回', 'plain');
 
-  ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
-  ctx.fillText('两人各开一个页面，一人建房间、另一人输同一房间号加入', W/2, 1220);
+  ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(90,80,65,0.5)'; ctx.font = '15px ' + FONT;
+  ctx.fillText('同一台电脑试玩：开两个窗口，一人建房、一人加入', W/2, 1240);
+}
+
+/* ---------------- 大厅 ---------------- */
+const LOB = { listX:70, listY:300, itemH:104, itemGap:12, maxShown:6 };
+function drawLobby(){
+  drawBg(true);
+  UI_BTNS = [];
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = INK; ctx.font = 'bold 44px ' + FONT;
+  ctx.fillText('大 厅', W/2, 150);
+  ctx.fillStyle = '#2f7d4f'; ctx.font = '17px ' + FONT;
+  ctx.fillText('服务器在线 · ' + NET.rooms.length + ' 个房间可加入', W/2, 208);
+
+  /* 房间列表 */
+  const shown = NET.rooms.slice(0, LOB.maxShown);
+  if (!shown.length){
+    ctx.fillStyle = INK3; ctx.font = '19px ' + FONT;
+    ctx.fillText('大厅还没有房间', W/2, 420);
+    ctx.fillStyle = 'rgba(90,80,65,0.55)'; ctx.font = '16px ' + FONT;
+    ctx.fillText('点下面「创建房间」，或者直接输房间号加入', W/2, 460);
+  }
+  shown.forEach((rm, i) => {
+    const y = LOB.listY + i*(LOB.itemH + LOB.itemGap);
+    const r = { x:LOB.listX, y, w:W - LOB.listX*2, h:LOB.itemH };
+    UI_BTNS.push({ id:'join:' + rm.name, r });
+    ctx.fillStyle = 'rgba(70,60,45,0.12)';
+    rr(ctx, r.x+2, r.y+4, r.w, r.h, 14); ctx.fill();
+    const g = ctx.createLinearGradient(0, y, 0, y+r.h);
+    g.addColorStop(0, '#fbf7ef'); g.addColorStop(1, '#f0e7d7');
+    ctx.fillStyle = g; rr(ctx, r.x, r.y, r.w, r.h, 14); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,105,80,0.28)'; ctx.lineWidth = 1.6;
+    rr(ctx, r.x, r.y, r.w, r.h, 14); ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = INK; ctx.font = 'bold 27px ' + FONT;
+    ctx.fillText(rm.name, r.x + 26, y + r.h/2 - 6);
+    ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+    ctx.fillText(rm.players >= 2 ? '已满' : '1 / 2 人 · 等对手', r.x + 26, y + r.h/2 + 24);
+
+    ctx.textAlign = 'right';
+    if (rm.locked){
+      ctx.fillStyle = '#8a5c05'; ctx.font = '16px ' + FONT;
+      ctx.fillText('需密码', r.x + r.w - 30, y + r.h/2 + 2);
+    } else {
+      ctx.fillStyle = '#2f7d4f'; ctx.font = '17px ' + FONT;
+      ctx.fillText('加入 →', r.x + r.w - 30, y + r.h/2 + 2);
+    }
+  });
+  if (NET.rooms.length > LOB.maxShown){
+    ctx.textAlign = 'center'; ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+    ctx.fillText('还有 ' + (NET.rooms.length - LOB.maxShown) + ' 个房间未显示', W/2, LOB.listY + LOB.maxShown*(LOB.itemH+LOB.itemGap) + 20);
+  }
+
+  /* 底部操作 */
+  uiBtn('openCreate', 70, 1030, 270, 86, '创建房间', 'primary');
+  uiBtn('refresh', 360, 1030, 290, 86, '刷新列表', 'plain');
+
+  ctx.textAlign = 'left'; ctx.fillStyle = INK2; ctx.font = '17px ' + FONT;
+  ctx.fillText('输入房间号直接加入', 80, 1180);
+  uiBtn('joinByNo', 464, 1216, 176, 60, '加入', 'plain');
+
+  uiBtn('toOnline', 70, 1330, 190, 66, '返回', 'plain');
+  uiBtn('leaveLobby', 280, 1330, 370, 66, '断开连接', 'plain');
+
+  if (NET.panel) drawLobbyPanel();
+}
+
+/* 大厅里的两个浮层：建房 / 输密码 */
+function drawLobbyPanel(){
+  ctx.fillStyle = 'rgba(28,26,23,0.55)'; ctx.fillRect(0, 0, W, H);
+  const create = NET.panel === 'create';
+  const box = create ? PANEL.create : PANEL.pwd;
+  const pw = 600, ph = box.h, px = (W-pw)/2, py = box.y;
+  ctx.fillStyle = PAPER_L; rr(ctx, px, py, pw, ph, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,105,80,0.35)'; ctx.lineWidth = 2;
+  rr(ctx, px, py, pw, ph, 18); ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK; ctx.font = 'bold 32px ' + FONT;
+  ctx.fillText(create ? '创 建 房 间' : '输 入 密 码', W/2, py + 52);
+
+  ctx.textAlign = 'left'; ctx.fillStyle = INK3; ctx.font = '17px ' + FONT;
+  if (create){
+    ctx.fillText('房间号（别人靠它找到你）', 150, py + 104);
+    ctx.fillText('房间密码（可留空）', 150, py + 216);
+    /* 隐私房勾选 */
+    const cb = { x:150, y:py + 328, w:30, h:30 };
+    UI_BTNS.push({ id:'togglePriv', r:{ x:cb.x-10, y:cb.y-12, w:cb.w+250, h:cb.h+26 } });
+    ctx.strokeStyle = 'rgba(120,105,80,0.5)'; ctx.lineWidth = 2;
+    rr(ctx, cb.x, cb.y, cb.w, cb.h, 6); ctx.stroke();
+    if (NET.formPriv){
+      ctx.strokeStyle = '#2f7d4f'; ctx.lineWidth = 3.5; ctx.beginPath();
+      ctx.moveTo(cb.x + 7, cb.y + 16); ctx.lineTo(cb.x + 13, cb.y + 23);
+      ctx.lineTo(cb.x + 24, cb.y + 8); ctx.stroke();
+    }
+    ctx.fillStyle = INK2; ctx.font = '19px ' + FONT;
+    ctx.fillText('隐私房间（不在大厅里显示）', cb.x + 44, cb.y + 8);
+    ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+    ctx.fillText('隐私房只能靠房间号 + 密码进入', cb.x + 44, cb.y + 34);
+  } else {
+    ctx.fillText('房间「' + NET.joinName + '」需要密码', 150, py + 108);
+  }
+
+  uiBtn('doCreate', 150, py + ph - 100, 200, 74, create ? '创建' : '加入', 'primary');
+  uiBtn('closePanel', px + pw - 350, py + ph - 100, 200, 74, '取消', 'plain');
+}
+
+/* ---------------- 房间等待界面 ---------------- */
+/* 进了房间但还没开局：看得见棋盘，动不了，只等房主点开始 */
+function drawRoom(){
+  drawBg();
+  drawBoardIn(V_PLAY, true);          // 空棋盘，进房间就已重置
+  /* 盖一层淡纸：这盘只是占位，真正的地图等开局才用种子生成 */
+  ctx.fillStyle = 'rgba(246,242,232,0.70)';
+  ctx.fillRect(0, BOT_Y, W, H - BOT_Y);
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(90,80,65,0.42)'; ctx.font = '22px ' + FONT;
+  ctx.fillText('开局后由种子生成地图', W/2, BOT_Y + (H - BOT_Y)/2 - 10);
+  ctx.fillStyle = 'rgba(90,80,65,0.30)'; ctx.font = '16px ' + FONT;
+  ctx.fillText('现在还不能布阵', W/2, BOT_Y + (H - BOT_Y)/2 + 28);
+
+  UI_BTNS = [];
+
+  /* 顶部信息卡 */
+  const cw = W - 120, cx = 60, cy = 96, ch = 300;
+  ctx.fillStyle = 'rgba(255,255,255,0.55)';
+  rr(ctx, cx, cy, cw, ch, 18); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,105,80,0.30)'; ctx.lineWidth = 1.6;
+  rr(ctx, cx, cy, cw, ch, 18); ctx.stroke();
+
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK3; ctx.font = '17px ' + FONT;
+  ctx.fillText('房 间', W/2, cy + 44);
+  ctx.fillStyle = INK; ctx.font = 'bold 44px ' + FONT;
+  ctx.fillText(NET.room || '—', W/2, cy + 96);
+
+  const isHost = NET.role === 'host';
+  ctx.fillStyle = isHost ? '#8a5a06' : '#1f4a6b'; ctx.font = '19px ' + FONT;
+  ctx.fillText(isHost ? '你是房主' : '你是挑战者', W/2, cy + 148);
+
+  /* 双方状态 */
+  const dot = (x, y, on) => { ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI*2);
+    ctx.fillStyle = on ? '#2f7d4f' : 'rgba(120,105,80,0.35)'; ctx.fill(); };
+  dot(cx + 60, cy + 210, true);
+  ctx.textAlign = 'left'; ctx.fillStyle = INK2; ctx.font = '18px ' + FONT;
+  ctx.fillText('我', cx + 78, cy + 210);
+  ctx.textAlign = 'right'; ctx.fillStyle = INK3; ctx.font = '17px ' + FONT;
+  ctx.fillText(NET.ready ? '已准备' : (isHost ? '房主' : '未准备'), cx + cw - 40, cy + 210);
+
+  dot(cx + 60, cy + 258, NET.peer);
+  ctx.textAlign = 'left'; ctx.fillStyle = INK2; ctx.font = '18px ' + FONT;
+  ctx.fillText('对手', cx + 78, cy + 258);
+  ctx.textAlign = 'right'; ctx.fillStyle = NET.peer ? '#2f7d4f' : INK3; ctx.font = '17px ' + FONT;
+  ctx.fillText(!NET.peer ? '等待进入…'
+    : (isHost ? (NET.peerReady ? '已准备' : '已进入 · 未准备') : '房主 · 已进入'),
+    cx + cw - 40, cy + 258);
+
+  /* 底部按钮 */
+  if (isHost){
+    const can = NET.peer && NET.peerReady;
+    uiBtn('startGame', 70, 1300, 340, 92, '开始游戏',
+      can ? 'primary' : 'off',
+      can ? '对手已准备' : (NET.peer ? '对方未准备' : '对方未进入房间'));
+    uiBtn('dissolve', 430, 1300, 220, 92, '解散房间', 'plain');
+  } else {
+    uiBtn('readyGo', 70, 1300, 340, 92, NET.ready ? '已准备就绪' : '准备就绪',
+      NET.ready ? 'off' : 'primary',
+      NET.ready ? '等房主开始' : '');
+    uiBtn('leaveRoom', 430, 1300, 220, 92, '退出房间', 'plain');
+  }
 }
 
 /* ---------------- 文字输入框（HTML 覆盖层） ---------------- */
-let addrInput = null, roomInput = null;
+let addrInput = null, joinNoInput = null, fRoomInput = null, fPwdInput = null, pwdInput = null;
+let connTimer = null, layoutKey = '';
 function makeNetInputs(){
-  const mk = (ph, key) => {
+  const mk = (ph, onIn) => {
     const el = document.createElement('input');
     el.type = 'text';
     el.placeholder = ph;
@@ -4280,37 +4490,58 @@ function makeNetInputs(){
       'text-align:center;border-radius:12px;padding:0 12px;outline:none;' +
       'font-family:"Songti SC","STSong","SimSun",serif;font-weight:600;' +
       'color:#2b2620;background:rgba(255,255,255,0.94);border:2px solid rgba(90,80,65,0.35);';
-    el.addEventListener('input', () => { NET[key] = el.value.trim(); });
+    el.addEventListener('input', () => onIn(el.value));
     el.addEventListener('keydown', e => { if (e.key === 'Enter') el.blur(); });
     document.body.appendChild(el);
     return el;
   };
-  addrInput = mk('ws://localhost:8787', 'addr');
-  roomInput = mk('房间号', 'room');
+  addrInput  = mk('ws://localhost:8787', v => { NET.addr = v.trim(); scheduleConnect(); });
+  joinNoInput = mk('房间号', v => { NET.joinNo = v.trim(); });
+  fRoomInput = mk('房间号', v => { NET.formRoom = v.trim(); });
+  fPwdInput  = mk('密码（可留空）', v => { NET.formPwd = v.trim(); });
+  pwdInput   = mk('房间密码', v => { NET.tmpPwd = v.trim(); });
   addrInput.value = NET.addr;
+}
+/* 改地址时别每敲一个字符就重连，停下来再连 */
+function scheduleConnect(){
+  clearTimeout(connTimer);
+  connTimer = setTimeout(() => { if (NET.screen === 'online') netConnect(); }, 700);
 }
 function layoutNetInputs(){
   if (!addrInput) return;
-  const show = NET.screen === 'online';
+  const sc = NET.screen, panel = NET.panel;
   const r = cv.getBoundingClientRect();
-  const put = (el, box) => {
-    if (!show){ el.style.display = 'none'; return; }
+  const key = sc + '|' + panel + '|' + Math.round(r.left) + ',' + Math.round(r.top) + ',' + Math.round(r.width);
+  if (key === layoutKey) return;
+  layoutKey = key;
+
+  const show = (el, box, on) => {
+    if (!on){ if (el.style.display !== 'none') el.style.display = 'none'; return; }
     el.style.display = 'block';
     el.style.left = (r.left + box.x * SCALE) + 'px';
     el.style.top = (r.top + box.y * SCALE) + 'px';
     el.style.width = (box.w * SCALE) + 'px';
     el.style.height = (box.h * SCALE) + 'px';
-    el.style.fontSize = Math.round(24 * SCALE) + 'px';
+    el.style.fontSize = Math.round(23 * SCALE) + 'px';
   };
-  put(addrInput, NET_UI.addr);
-  put(roomInput, NET_UI.room);
+  show(addrInput, NET_UI.addr, sc === 'online');
+  show(joinNoInput, NET_UI.joinNo, sc === 'lobby' && panel === '');
+  show(fRoomInput, NET_UI.fRoom, sc === 'lobby' && panel === 'create');
+  show(fPwdInput, NET_UI.fPwd, sc === 'lobby' && panel === 'create');
+  show(pwdInput, NET_UI.pwd, sc === 'lobby' && panel === 'pwd');
+  if (sc === 'lobby' && panel === 'create'){
+    fRoomInput.style.borderColor = NET.formPriv ? 'rgba(47,125,79,0.6)' : 'rgba(90,80,65,0.35)';
+  }
 }
 
 /* ---------------- 屏幕切换 ---------------- */
 function showScreen(s){
   NET.screen = s;
-  if (s !== 'game' && NET.ws && !NET.pvp) netClose();
-  if (s === 'game'){ closeInspect(); G.dragger = null; }
+  if (s === 'home'){ netClose(); NET.link = 'idle'; NET.status = ''; }
+  if (s === 'online'){ layoutKey = ''; netAutoConnect(); }
+  if (s === 'lobby'){ NET.panel = ''; netSend({ t:'list' }); }
+  if (s === 'game'){ closeInspect(); G.dragger = null; UI_BTNS = []; }
+  layoutKey = '';
   layoutNetInputs();
 }
 function startSolo(){
@@ -4325,7 +4556,8 @@ function startSolo(){
 function netSend(o){
   const ws = NET.ws;
   if (!ws || ws.readyState !== 1) return;
-  try { ws.send(JSON.stringify({ t:'relay', data:o })); } catch (e){}
+  const out = o.t ? o : { t:'relay', data:o };    // 带 t 的是协议消息，其余是游戏内通道
+  try { ws.send(JSON.stringify(out)); } catch (e){}
 }
 function netClose(){
   NET.peer = false;
@@ -4334,26 +4566,40 @@ function netClose(){
     try { NET.ws.close(); } catch (e){}
   }
   NET.ws = null;
+  NET.rooms = [];
 }
-function netConnect(role){
+function netAutoConnect(){
+  if (NET.ws && (NET.ws.readyState === 0 || NET.ws.readyState === 1)) return;
+  netConnect();
+}
+function netConnect(){
   netClose();
-  NET.role = role;
-  NET.status = '连接中…';
+  NET.link = 'connecting'; NET.status = '连接中…';
   let ws;
-  try { ws = new WebSocket(NET.addr); } catch (e){ NET.status = '服务器地址格式不对'; return; }
+  try { ws = new WebSocket(NET.addr); }
+  catch (e){ NET.link = 'offline'; NET.status = '服务器地址格式不对'; return; }
   NET.ws = ws;
   ws.onopen = () => {
-    NET.status = '已连接 · 进房中';
-    ws.send(JSON.stringify({ t:'join', room:NET.room || 'default', role }));
+    NET.link = 'online'; NET.status = '服务器在线';
+    ws.send(JSON.stringify({ t:'list' }));
+    const nr = NET.pendingRoom;
+    if (nr){                                   // ?net=host|guest 直连用
+      NET.pendingRoom = '';
+      ws.send(JSON.stringify(NET.pendingRole === 'host'
+        ? { t:'create', room:nr, pwd:'' }
+        : { t:'join', room:nr, pwd:'' }));
+    }
   };
-  ws.onerror = () => { NET.status = '连不上 · 检查地址与服务器是否在跑'; };
+  ws.onerror = () => { NET.link = 'offline'; NET.status = '连不上 · 检查地址或服务器是否在跑'; };
   ws.onclose = () => {
+    NET.link = 'offline';
     NET.peer = false;
     if (NET.pvp){
       NET.status = '连接断开';
       if (G.phase !== 'over'){ G.phase = 'over'; G.result = 'lose'; toast('连接断开 · 本局判负'); }
+    } else if (NET.screen === 'online' || NET.screen === 'lobby' || NET.screen === 'room'){
+      NET.status = '连接已断开';
     }
-    else if (NET.screen === 'online') NET.status = '连接已断开';
   };
   ws.onmessage = ev => {
     let m; try { m = JSON.parse(ev.data); } catch (e){ return; }
@@ -4361,27 +4607,51 @@ function netConnect(role){
   };
 }
 function netOnMessage(m){
-  if (m.t === 'joined'){
-    NET.peer = !!m.peer;
-    NET.status = m.peer ? '对手已就位 · 开局中' : '已进房 · 等对手加入';
-    if (m.peer && NET.role === 'host') pvpHostStart();
-  } else if (m.t === 'peer'){
-    NET.peer = true;
-    NET.status = '对手已就位 · 开局中';
-    if (NET.role === 'host') pvpHostStart();
-  } else if (m.t === 'relay'){
-    netOnGame(m.data);
-  } else if (m.t === 'peerleft'){
-    NET.peer = false;
-    if (NET.pvp && G.phase !== 'over'){ G.phase = 'over'; G.result = 'win'; toast('对手离开 · 本局判胜'); }
-  } else if (m.t === 'err'){
-    NET.status = m.msg || '服务器拒绝：房间已满';
+  if (m.t === 'rooms'){
+    NET.rooms = Array.isArray(m.list) ? m.list : [];
+    return;
   }
+  if (m.t === 'created' || m.t === 'joined'){
+    NET.room = m.room;
+    NET.role = m.t === 'created' ? 'host' : 'guest';
+    NET.peer = !!m.peer;
+    NET.peerReady = false; NET.ready = false;
+    enterRoom();
+    return;
+  }
+  if (m.t === 'peer'){
+    NET.peer = true; NET.peerReady = false;
+    if (NET.screen === 'room') toast('对手已进入房间');
+    return;
+  }
+  if (m.t === 'peerleft'){
+    NET.peer = false; NET.peerReady = false;
+    if (NET.pvp && G.phase !== 'over'){ G.phase = 'over'; G.result = 'win'; toast('对手离开 · 本局判胜'); }
+    else if (NET.screen === 'room') toast('对手已离开房间');
+    return;
+  }
+  if (m.t === 'dissolved'){
+    const inRoom = NET.screen === 'room' || NET.pvp;
+    NET.pvp = false; NET.peer = false; NET.peerReady = false; NET.ready = false;
+    NET.room = ''; NET.role = '';
+    if (inRoom){ showScreen('lobby'); toast(m.msg || '房间已解散'); }
+    return;
+  }
+  if (m.t === 'relay'){ netOnGame(m.data); return; }
+  if (m.t === 'err'){ NET.status = m.msg || '服务器拒绝'; toast(m.msg || '服务器拒绝'); return; }
+}
+/* 进房间（还没开局）：先摆一张干净空盘，看得见但动不了 */
+function enterRoom(){
+  NET.panel = '';
+  NET.pvp = false;
+  newGame();
+  showScreen('room');
 }
 /* 房主发种子，双方用同一个种子开同一张地图 */
 function pvpHostStart(){
   if (NET.pvp) return;                    // 已经在打/已经开过局
   NET.seed = (Math.random() * 1e9) | 0;
+  netSend({ t:'started' });               // 告诉服务器这局开打了，大厅不再挂着这间房
   netSend({ k:'start', seed:NET.seed });
   pvpStart(NET.seed, true);
 }
@@ -4400,6 +4670,7 @@ function pvpStart(seed, isHost){
 }
 function netOnGame(d){
   if (!d) return;
+  if (d.k === 'ready'){ NET.peerReady = true; toast('对手已准备'); return; }
   if (d.k === 'start'){ pvpStart(d.seed, false); return; }
   if (!NET.pvp) return;
   if (d.k === 'side') netApplySide(d);
@@ -4466,26 +4737,80 @@ function netApplyRaid(d){
 }
 function screenButton(id){
   sfx('click');
+
+  /* 首页 / 联机页 */
   if (id === 'solo'){ startSolo(); return; }
-  if (id === 'online'){
-    showScreen('online');
-    NET.status = '';
+  if (id === 'online'){ NET.link = 'idle'; NET.status = ''; showScreen('online'); return; }
+  if (id === 'toHome'){ showScreen('home'); return; }
+  if (id === 'enterLobby'){
+    if (NET.link !== 'online') { toast('先连上服务器'); return; }
+    NET.listT = 0; showScreen('lobby'); return;
+  }
+
+  /* 大厅 */
+  if (id === 'toOnline'){ showScreen('online'); return; }
+  if (id === 'leaveLobby'){ netClose(); NET.link = 'idle'; NET.status = '已断开'; showScreen('online'); return; }
+  if (id === 'refresh'){ netSend({ t:'list' }); return; }
+  if (id === 'openCreate'){
+    NET.panel = 'create'; NET.formRoom = NET.formPwd = ''; NET.formPriv = false;
+    if (fRoomInput) fRoomInput.value = '';
+    if (fPwdInput) fPwdInput.value = '';
+    layoutKey = ''; layoutNetInputs(); return;
+  }
+  if (id === 'togglePriv'){ NET.formPriv = !NET.formPriv; return; }
+  if (id === 'closePanel'){ NET.panel = ''; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = ''; return; }
+  if (id === 'doCreate'){
+    const nm = (NET.formRoom || '').trim();
+    if (!nm){ toast('先填房间号'); return; }
+    netSend({ t:'create', room:nm, pwd:(NET.formPwd || '').trim(), priv:NET.formPriv });
     return;
   }
-  if (id === 'back'){ netClose(); NET.pvp = false; NET.status = ''; showScreen('home'); return; }
-  if (id === 'host' || id === 'join'){
-    if (!NET.room) { NET.status = '先填房间号'; return; }
-    if (!NET.addr){ NET.status = '先填服务器地址'; return; }
-    NET.started = false;
-    NET.pvp = false;
-    netConnect(id === 'host' ? 'host' : 'guest');
+  if (id === 'doJoinPwd'){
+    netSend({ t:'join', room:NET.joinName, pwd:(NET.tmpPwd || '').trim() });
+    NET.panel = ''; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = '';
+    return;
+  }
+  if (id === 'joinByNo'){
+    const nm = (NET.joinNo || '').trim();
+    if (!nm){ toast('先填房间号'); return; }
+    const rm = NET.rooms.find(r => r.name === nm);
+    if (rm && rm.locked){ NET.joinName = nm; NET.panel = 'pwd'; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = ''; return; }
+    netSend({ t:'join', room:nm, pwd:'' });
+    return;
+  }
+  if (id.indexOf('join:') === 0){
+    const nm = id.slice(5);
+    const rm = NET.rooms.find(r => r.name === nm);
+    if (rm && rm.locked){ NET.joinName = nm; NET.panel = 'pwd'; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = ''; return; }
+    netSend({ t:'join', room:nm, pwd:'' });
+    return;
+  }
+
+  /* 房间内 */
+  if (id === 'startGame'){
+    if (!NET.peer){ toast('对方还没进房间'); return; }
+    if (!NET.peerReady){ toast('对方还没准备'); return; }
+    pvpHostStart(); return;
+  }
+  if (id === 'dissolve'){ netSend({ t:'dissolve' }); return; }
+  if (id === 'readyGo'){
+    if (NET.ready) return;
+    NET.ready = true; netSend({ k:'ready' }); toast('已准备 · 等房主开局'); return;
+  }
+  if (id === 'leaveRoom'){
+    netSend({ t:'leave' });
+    NET.room = ''; NET.role = ''; NET.peer = false; NET.peerReady = false; NET.ready = false;
+    showScreen('lobby'); return;
   }
 }
 
 /* ---------------- 主绘制 ---------------- */
 function draw(){
-  if (NET.screen !== 'game'){        // 首页 / 联机页：只画菜单，不碰对局
-    if (NET.screen === 'online') drawOnline(); else drawHome();
+  if (NET.screen !== 'game'){        // 菜单类屏幕：不碰对局
+    if (NET.screen === 'online') drawOnline();
+    else if (NET.screen === 'lobby') drawLobby();
+    else if (NET.screen === 'room') drawRoom();
+    else drawHome();
     return;
   }
   drawBg();
@@ -4579,9 +4904,11 @@ function onDown(ev){
   if (G.phase === 'over'){
     if (G._againBtn && inRect(p, G._againBtn)){
       sfx('click');
-      if (NET.pvp){                       // 联机不在这里重开：两边各重开就散了，回首页重新配对
-        netClose(); NET.pvp = false; NET.started = false; NET.seen = {};
-        showScreen('home');
+      if (NET.pvp){                       // 联机不在这里重开：两边各重开就散了，回大厅重新配对
+        netSend({ t: NET.role === 'host' ? 'dissolve' : 'leave' });
+        NET.pvp = false; NET.started = false; NET.seen = {};
+        NET.room = ''; NET.role = ''; NET.peer = false; NET.peerReady = false; NET.ready = false;
+        showScreen('lobby');
         return;
       }
       newGame(); startBattle();
@@ -4815,7 +5142,14 @@ function loop(ts){
   let dt = (ts - last) / 1000;
   last = ts;
   if (dt > 0.05) dt = 0.05;
-  if (NET.screen !== 'game'){ draw(); requestAnimationFrame(loop); return; }
+  if (NET.screen !== 'game'){
+    if (NET.screen === 'lobby' && NET.link === 'online'){   // 大厅：每 2 秒刷新一次房间列表
+      NET.listT -= dt;
+      if (NET.listT <= 0){ NET.listT = 2; netSend({ t:'list' }); }
+    }
+    layoutNetInputs();
+    draw(); requestAnimationFrame(loop); return;
+  }
   if (G.paused){ draw(); requestAnimationFrame(loop); return; }   // 暂停：全局冻结，只重绘
   G.t += dt;
   step(dt);
@@ -4842,10 +5176,12 @@ function boot(){
     const rm = /[?&]room=([^&]+)/.exec(location.search || '');
     const ad = /[?&]addr=([^&]+)/.exec(location.search || '');
     if (ad) NET.addr = decodeURIComponent(ad[1]);
-    NET.room = rm ? decodeURIComponent(rm[1]) : 'default';
+    NET.pendingRole = nr[1];
+    NET.pendingRoom = rm ? decodeURIComponent(rm[1]) : 'default';
     NET.screen = 'online';
     NET.pvp = false;
-    netConnect(nr[1]);
+    if (addrInput) addrInput.value = NET.addr;
+    netConnect();
   }
   resize();
   window.addEventListener('resize', resize);
