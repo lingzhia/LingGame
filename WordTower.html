@@ -771,14 +771,17 @@ function autoFormHeroes(board, mine){
 }
 
 function newGame(seed){
-  if (seed !== undefined && seed !== null) fixedSeed = (seed | 0) >>> 0;
-  // 对局随机源：有种子（?seed= / 联机 / headless）时整局玩法随机完全可复现
-  gRnd = (fixedSeed === null || fixedSeed === undefined) ? Math.random : mulberry32(((fixedSeed | 0) ^ 0x5f3759df) >>> 0);
+  /* 种子优先级：本次显式传入（headless / 回放）> 强制种子（?seed= / 联机同图）> 现掷一个。
+     每局都有种子，一局 = 种子 + 操作，所以每局都能完整记录、原样回放（见 REC / REPLAY）。 */
+  const gs = (seed !== undefined && seed !== null) ? ((seed | 0) >>> 0)
+           : (fixedSeed !== null && fixedSeed !== undefined) ? (fixedSeed >>> 0)
+           : ((Math.random() * 1e9) | 0);
+  gRnd = mulberry32((gs ^ 0x5f3759df) >>> 0);
   G = {
     phase:'intro',          // intro | prep | battle | shop | over
     paused:false,           // 手动暂停：全场冻结
     vsAI:true,              // 人机对战（可暂停）／将来真人对战置 false 即禁用暂停
-    seed:(fixedSeed === null || fixedSeed === undefined) ? null : (fixedSeed >>> 0),
+    seed:gs,
     t:0, time:0,
     mantou:8,               // 开局军费：刚好够征一次兵
     enlistCost:5,           // 征兵费：5 起，每征一次 +1，只涨不降
@@ -816,7 +819,7 @@ function newGame(seed){
     poolRound:1,            // 字池第几轮（摸空一次 +1）
   };
   // 每局重掷一张地图（两边共用一张，上下镜像），再按这张图发熟地
-  genMap();
+  genMap(gs);
   // 开局只发 START_OPEN 格熟地，其余都要用铲子挖（电脑半场用同一张名单的镜像）
   computeFreeLand();
   for (const k in FREE_M) G.unlocked[k] = true;
@@ -1417,7 +1420,8 @@ function startWave(early){
    随机源：单机没种子 → 真随机（跟以前一样）；联机有种子 → 由 (波次, 序号, 线)
    直接算出来。这样两端各跑各的，同一波第 i 个兵一定是同一个兵，不靠时序。 */
 function waveRnd(n, i, salt){
-  let x = (fixedSeed >>> 0) ^ Math.imul(n + 1, 0x9e3779b1)
+  const s = (G && G.seed !== null && G.seed !== undefined) ? (G.seed >>> 0) : 0;
+  let x = s ^ Math.imul(n + 1, 0x9e3779b1)
         ^ Math.imul(i + 1, 0x85ebca6b) ^ Math.imul(salt + 1, 0xc2b2ae35);
   x = Math.imul(x ^ (x >>> 15), 0x2545f491);
   x ^= x >>> 13;
@@ -1425,7 +1429,8 @@ function waveRnd(n, i, salt){
 }
 function enemySpec(n, i, salt){
   const lv = waveTier(n);
-  const seeded = (fixedSeed !== null && fixedSeed !== undefined);
+  // 每局都有种子 → 来兵序列与两端时序无关（联机同种子必然同兵，回放也一致）
+  const seeded = !!(G && G.seed !== null && G.seed !== undefined);
   const r = seeded ? waveRnd(n, i | 0, salt | 0) : gRnd();
   let key;
   if (n <= 2)      key = r < 0.55 ? 'dao' : (r < 0.85 ? 'qiang' : (r < 0.95 ? 'gong' : 'qi'));
@@ -2601,6 +2606,7 @@ function endGame(win){
   G.phase = 'over';
   G.result = win ? 'win' : 'lose';
   sfx(win ? 'win' : 'lost');
+  recFinish();                     // 每局结束都落一份存档（结算页可回放）
 }
 
 function step(dt){
@@ -2668,6 +2674,7 @@ function step(dt){
 function startBattle(){
   if (NET.screen !== 'game') showScreen('game');   // 开打就一定在对局屏（首页/联机页点进来也走这里）
   G.phase = 'prep'; G.prepT = 15;
+  recBegin();                                      // 单人对局：从备战这一秒开始录
   toast('备战 15 秒 · 快布阵');
 }
 
@@ -2675,6 +2682,7 @@ function startBattle(){
 /* 只有人机对战才能暂停：将来真人对战把 G.vsAI 置 false，暂停按钮与快捷键一起失效 */
 function canPause(){ return !!G && G.vsAI && (G.phase === 'prep' || G.phase === 'battle'); }
 function setPaused(v){
+  if (REPLAY.on) return;          // 回放中不暂停：录像里的暂停只冻结当时，不影响局面
   if (v && !canPause()) return;
   G.paused = !!v;
   G.dragger = null;              // 松开手里拖着的牌，避免冻结时卡住
@@ -4197,18 +4205,58 @@ function drawOver(){
       ctx.fillText(label, r.x + r.w/2, r.y + r.h/2 + 1);
     };
     G._backBtn = null;
+    G._replayBtn = null;           // 联机不留单人的回放入口
     mk(bx, 'again', NET.peer ? '再 来 一 局' : '对 手 已 离 开', !!NET.peer);
     mk(bx + bw + gap, 'back', '返 回 大 厅', false);
   } else {
     G._backBtn = null;
-    const b = { x: W/2 - 130, y: py + ph - 84, w: 260, h: 56 };
-    G._againBtn = b;
-    const bg = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
-    bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
-    ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
-    ctx.fillStyle = '#fff6ee'; ctx.font = '23px ' + FONT;
-    ctx.fillText('再 战 一 局', W/2, b.y + b.h/2 + 1);
+    /* 单人：左边「回放本局」（刚打完的那局有录像才亮），右边「再战一局」 */
+    const canReplay = !!(LAST_REC && LAST_REC.events && LAST_REC.events.length);
+    G._replayBtn = null;
+    const bw = 240, gap = 16, by = py + ph - 84;
+    const bx = canReplay ? px + (pw - bw*2 - gap)/2 : W/2 - 130;
+    const drawBtn = (r, label, primary) => {
+      const g2 = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+      if (primary){ g2.addColorStop(0, '#c0483a'); g2.addColorStop(1, '#9e3226'); }
+      else { g2.addColorStop(0, '#fbf7ef'); g2.addColorStop(1, '#eee4d3'); }
+      ctx.fillStyle = 'rgba(70,60,45,0.14)';
+      rr(ctx, r.x+2, r.y+3, r.w, r.h, 14); ctx.fill();
+      ctx.fillStyle = g2; rr(ctx, r.x, r.y, r.w, r.h, 14); ctx.fill();
+      if (!primary){ ctx.strokeStyle = 'rgba(120,105,80,0.35)'; ctx.lineWidth = 1.5; rr(ctx, r.x, r.y, r.w, r.h, 14); ctx.stroke(); }
+      ctx.fillStyle = primary ? '#fff6ee' : INK;
+      ctx.font = '22px ' + FONT;
+      ctx.fillText(label, r.x + r.w/2, r.y + r.h/2 + 1);
+    };
+    if (canReplay){
+      const rb = { x:bx, y:by, w:bw, h:56 };
+      const ab = { x:bx + bw + gap, y:by, w:bw, h:56 };
+      G._replayBtn = rb; G._againBtn = ab;
+      drawBtn(rb, '回 放 本 局', false);
+      drawBtn(ab, '再 战 一 局', true);
+    } else {
+      const ab = { x:bx, y:by, w:bw, h:56 };
+      G._againBtn = ab;
+      drawBtn(ab, '再 战 一 局', true);
+    }
   }
+}
+
+/* 回放 HUD：左上角「回放 ×2」，右上角「退出回放」 */
+function drawReplayHud(){
+  const bw = 116, bh = 42, bx = W - bw - 18, by = 18;
+  REPLAY.exitBtn = { x:bx, y:by, w:bw, h:bh };
+  ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = 'rgba(28,26,23,0.74)';
+  rr(ctx, 18, 18, 148, bh, 12); ctx.fill();
+  ctx.fillStyle = '#f6efe2'; ctx.font = '19px ' + FONT;
+  ctx.fillText('回放 ×' + REPLAY.speed, 36, by + bh/2 + 1);
+  ctx.fillStyle = 'rgba(28,26,23,0.74)';
+  rr(ctx, bx, by, bw, bh, 12); ctx.fill();
+  ctx.strokeStyle = 'rgba(246,239,226,0.55)'; ctx.lineWidth = 1.5;
+  rr(ctx, bx, by, bw, bh, 12); ctx.stroke();
+  ctx.fillStyle = '#f6efe2'; ctx.font = '19px ' + FONT; ctx.textAlign = 'center';
+  ctx.fillText('退出回放', bx + bw/2, by + bh/2 + 1);
+  ctx.textAlign = 'left';
 }
 
 /* ---------------- 暂停面板 ---------------- */
@@ -5228,12 +5276,14 @@ function draw(){
   if (G.phase === 'shop') drawShop();
   if (G.phase === 'over') drawOver();
   if (G.paused) drawPause();
+  if (REPLAY.on) drawReplayHud();
 }
 
 /* ============================================================
    输入
    ============================================================ */
 function toLogical(ev){
+  if (IN_HOOK) return { x:IN_HOOK.x, y:IN_HOOK.y };   // 回放：直接喂录好的逻辑坐标
   const r = cv.getBoundingClientRect();
   return { x: (ev.clientX - r.left) / SCALE, y: (ev.clientY - r.top) / SCALE };
 }
@@ -5276,6 +5326,12 @@ function onDown(ev){
   ev.preventDefault();
   const p = toLogical(ev);
 
+  // 回放中：不接受真实操作，只认「退出回放」
+  if (REPLAY.on && !REPLAY.dispatching){
+    if (REPLAY.exitBtn && inRect(p, REPLAY.exitBtn)){ sfx('click'); stopReplay(false); }
+    return;
+  }
+
   // 首页 / 联机页：只响应菜单按钮
   if (NET.screen !== 'game'){
     for (const b of UI_BTNS) if (inRect(p, b.r)){ screenButton(b.id); return; }
@@ -5302,6 +5358,11 @@ function onDown(ev){
     return;
   }
   if (G.phase === 'over'){
+    if (G._replayBtn && inRect(p, G._replayBtn)){
+      sfx('click');
+      startReplay(LAST_REC);
+      return;
+    }
     if (G._againBtn && inRect(p, G._againBtn)){
       sfx('click');
       if (NET.pvp){
@@ -5392,6 +5453,7 @@ function onDown(ev){
   if (hadInspect) closeInspect();
 }
 function onMove(ev){
+  if (REPLAY.on && !REPLAY.dispatching) return;
   if (G.paused || !G.dragger) return;
   ev.preventDefault();
   const p = toLogical(ev);
@@ -5399,6 +5461,7 @@ function onMove(ev){
   if (Math.hypot(p.x - G.dragger.sx, p.y - G.dragger.sy) > 8) G.dragger.moved = true;
 }
 function onUp(ev){
+  if (REPLAY.on && !REPLAY.dispatching) return;
   if (G.paused){ G.dragger = null; return; }
   const d = G.dragger;
   if (!d) return;
@@ -5504,9 +5567,14 @@ function onUp(ev){
 }
 
 function bindInput(){
-  cv.addEventListener('pointerdown', onDown, { passive:false });
-  cv.addEventListener('pointermove', onMove, { passive:false });
-  cv.addEventListener('pointerup', onUp, { passive:false });
+  /* 输入先过一层录制：把落点记到当前逻辑步上（回放就靠这些点重演整局） */
+  const wrap = (type, fn) => (ev) => {
+    if (!REPLAY.on && HAS_LS) recEvent(type, toLogical(ev));
+    fn(ev);
+  };
+  cv.addEventListener('pointerdown', wrap('down', onDown), { passive:false });
+  cv.addEventListener('pointermove', wrap('move', onMove), { passive:false });
+  cv.addEventListener('pointerup', wrap('up', onUp), { passive:false });
   cv.addEventListener('pointercancel', () => { G.dragger = null; });
   cv.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -5526,6 +5594,93 @@ function bindInput(){
 }
 
 /* ============================================================
+   对局录制 / 回放
+   一局 = 种子 + 输入事件（按下 / 移动 / 抬起，按逻辑步编号记录）。
+   逻辑是确定性的（固定 1/60 步长 + 种子随机），所以把这些输入重放一遍，
+   整局就能原样重演 —— 不需要存画面，也不需要存每一步的盘面。
+   ============================================================ */
+const REC_KEY = 'wt_record_v1';
+const HAS_LS = (() => { try { return !!window.localStorage; } catch(e){ return false; } })();
+const REC = { on:false, seed:0, aiLevel:0, events:[], start:0 };
+let LAST_REC = null;                       // 刚结束的那一局（结算页「回放本局」用）
+const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null };
+let IN_HOOK = null;                        // 回放时把录好的坐标直接喂进输入层
+
+function recBegin(){
+  if (!HAS_LS || NET.pvp || REPLAY.on){ REC.on = false; return; }
+  REC.on = true; REC.seed = G.seed; REC.aiLevel = AI_LV; REC.events = []; REC.start = Date.now();
+  SIM.n = 0; SIM.acc = 0;                  // 事件按「开战后的第几步」编号
+}
+function recEvent(type, p){
+  if (!REC.on) return;
+  REC.events.push([SIM.n, type, Math.round(p.x), Math.round(p.y)]);
+}
+function recLoad(){
+  try { const s = localStorage.getItem(REC_KEY); return s ? (JSON.parse(s) || []) : []; } catch(e){ return []; }
+}
+function recSave(rec){
+  try {
+    const arr = recLoad(); arr.push(rec);
+    while (arr.length > 10) arr.shift();                       // 只留最近 10 局
+    let s = JSON.stringify(arr);
+    while (s.length > 1200000 && arr.length > 1){ arr.shift(); s = JSON.stringify(arr); }
+    localStorage.setItem(REC_KEY, s);
+  } catch(e){ /* 存不下就算了，不挡游戏 */ }
+}
+function recFinish(){
+  if (!REC.on) return;
+  REC.on = false;
+  if (!REC.events.length) return;          // 一步没动过，不留记录
+  LAST_REC = { ts:Date.now(), seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
+               time:+G.time.toFixed(1), wave:G.wave, events:REC.events };
+  recSave(LAST_REC);
+}
+/* 回放：同种子重新开局，在录下来的那一步喂回同样的输入，2 倍速播完 */
+function startReplay(rec){
+  if (!rec || !rec.events || !rec.events.length){ toast('这一局没有可回放的操作'); return; }
+  REPLAY.on = true; REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
+  REPLAY.speed = 2; REPLAY.dispatching = false;
+  const lastTick = rec.events[rec.events.length - 1][0];
+  REPLAY.limit = lastTick + 60 * 120;      // 保险：最多再跑 2 分钟
+  newGame(rec.seed >>> 0);
+  setAILevel(rec.aiLevel | 0);
+  SIM.n = 0; SIM.acc = 0;
+  startBattle();                           // 录制也是从「备战」这一秒开始
+  REPLAY.on = true;
+  REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
+  toast('回放本局 · ' + REPLAY.speed + ' 倍速', GOLD);
+}
+function replayDispatch(type, x, y){
+  REPLAY.dispatching = true;
+  IN_HOOK = { x, y };
+  const ev = { preventDefault(){}, clientX:0, clientY:0, pointerId:1, button:0, target:cv };
+  try {
+    if (type === 'down') onDown(ev);
+    else if (type === 'move') onMove(ev);
+    else onUp(ev);
+  } finally { IN_HOOK = null; REPLAY.dispatching = false; }
+}
+function replayPump(){
+  if (!REPLAY.on) return;
+  while (REPLAY.i < REPLAY.ev.length && REPLAY.ev[REPLAY.i][0] <= SIM.n){
+    const e = REPLAY.ev[REPLAY.i++];
+    replayDispatch(e[1], e[2], e[3]);
+  }
+  if (G.phase === 'over' || SIM.n > REPLAY.limit) stopReplay(true);
+}
+function stopReplay(finished){
+  REPLAY.on = false; REPLAY.dispatching = false; IN_HOOK = null; REPLAY.exitBtn = null;
+  G.paused = false;
+  if (finished){
+    if (!G.result) G.result = 'lose';      // 录到一半的局：按当前局面收尾
+    G.phase = 'over';
+    return;
+  }
+  toast('已退出回放 · 开新的一局');
+  newGame(); startBattle();
+}
+
+/* ============================================================
    主循环
    ============================================================ */
 function resize(){
@@ -5541,19 +5696,24 @@ function resize(){
 }
 
 let last = 0;
-/* 原来这里是「dt 超过 50ms 就砍成 50ms」：一掉帧，游戏时间就比真实时间慢，而且永远补不回来。
-   联机是各跑各的模拟，两端帧率不一样，时间轴就一路差下去 ——
-   一个窗口被挡住，浏览器把它的刷新率压到 1fps，那一局就变成慢动作，两边看到的自然对不上。
-   现在改成：真实过了多久就推进多久，只是切成一帧不超过 50ms 的小步（精度不变，总时间跟上）。
-   正常 60fps 时 dt=16.7ms，一步都不多，跟以前完全一样。 */
-const SIM_CHUNK = 0.05;
+/* 掉帧不能让游戏时间变慢：积攒真实经过的时间，按固定步长补齐（见 simAdvance）。
+   联机是各跑各的模拟，两端帧率不一样，靠这个保证时间轴不漂。 */
+/* 逻辑固定 1/60 秒一步：一帧可能走 0、1、2 步，但步长永远一样。
+   这是「回放能一模一样」的前提 —— 同样的步数 + 同样的输入 = 同样的局面。
+   渲染仍然是逐帧的，画面不受影响。 */
+const SIM_STEP = 1/60;
+const SIM = { n:0, acc:0 };
 function simAdvance(dtReal){
-  let left = dtReal, guard = 0;
-  while (left > 0.0001 && guard++ < 60){
-    const d = Math.min(left, SIM_CHUNK);
-    step(d);
-    left -= d;
+  SIM.acc += dtReal;
+  let guard = 0;
+  replayPump();                          // 回放：先补「第 n 步结束后」发生的输入
+  while (SIM.acc >= SIM_STEP - 1e-9 && guard++ < 240){
+    step(SIM_STEP);
+    SIM.n++;
+    SIM.acc -= SIM_STEP;
+    replayPump();                        // 记录按「第几步之后」编号，这里对齐
   }
+  if (guard >= 240) SIM.acc = 0;      // 落后太多（切后台回来）：丢掉，不追
 }
 /* 页面切到后台时浏览器会把 requestAnimationFrame 掐掉（或压到 1fps）。
    联机对局不能因此停摆，所以不可见时改用 setTimeout 接着驱动。 */
@@ -5599,7 +5759,7 @@ function loop(ts){
   }
   if (G.paused){ draw(); nextFrame(); return; }   // 暂停：全局冻结，只重绘
   G.t += dt;
-  simAdvance(dt);
+  simAdvance(REPLAY.on ? dt * REPLAY.speed : dt);  // 回放按倍速喂同样的逻辑步
   if (NET.pvp){ NET.pushT -= dt; if (NET.pushT <= 0){ NET.pushT = 0.4; netPushSide(); } netCheckOver(); }
   if (G.toastT > 0) G.toastT -= dt;
   if (G.aduShield > 0) G.aduShield -= dt;
@@ -5695,7 +5855,9 @@ function snapshotData(){
 /* 无头 / 自动化测试钩子 */
 window.__api = {
   newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
-  snapshotData, recycleCell,
+  snapshotData, recycleCell, simAdvance, startReplay, recBegin, recFinish,
+  SIM, REPLAY, REC,
+  get LAST_REC(){ return LAST_REC; },
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
   castSkill, openShop, closeShop, nextShopWave, ITEMS, endGame, recycleValue,
   setPaused, togglePause, pauseAction, canPause, BTN_PAUSE,

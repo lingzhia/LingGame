@@ -54,12 +54,16 @@ function universal(){
 }
 
 function makeSandbox(){
+  const listeners = {};
   const canvas = {
     getContext: () => universal(),
-    addEventListener(){}, removeEventListener(){},
+    addEventListener(type, fn){ (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener(){},
+    _fire(type, ev){ (listeners[type] || []).forEach(fn => fn(ev)); },
     style: {}, width: 0, height: 0,
     getBoundingClientRect: () => ({ left:0, top:0, width:720, height:1446 }),
   };
+  const store = {};                         // localStorage 桩：录制/回放要用
   const sb = {
     console, Math, Date, JSON,
     setTimeout, clearTimeout, setInterval, clearInterval,
@@ -67,6 +71,12 @@ function makeSandbox(){
     requestAnimationFrame: () => 0,          // 不启动渲染循环
     cancelAnimationFrame(){},
     addEventListener(){}, removeEventListener(){},   // boot() 里 window.addEventListener('resize')
+    localStorage: {
+      getItem: k => (k in store ? store[k] : null),
+      setItem: (k, v) => { store[k] = String(v); },
+      removeItem: k => { delete store[k]; },
+    },
+    _canvas: canvas,
     location: { search: '', href: 'http://localhost/headless' },
     devicePixelRatio: 1, innerWidth: 720, innerHeight: 1446,
     document: {
@@ -312,5 +322,9 @@ function main(){
   return runScript(path.resolve(arg));
 }
 
-try { main(); }
-catch (e){ out({ ok:false, fatal:e.message, stack:e.stack }); process.exit(1); }
+if (require.main === module){
+  try { main(); }
+  catch (e){ out({ ok:false, fatal:e.message, stack:e.stack }); process.exit(1); }
+}
+
+module.exports = { loadGame, exec };      // 测试脚本可以直接复用加载器
