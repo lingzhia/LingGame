@@ -1655,7 +1655,7 @@ function strikeMarcher(m, foe){
       if (m.vs && m.vs.indexOf(o.key) >= 0) de *= 1.6;
       damageMarcher(o, de, m.owner);
     }
-    if (extra.length) fxHit(mode, m.x, m.y, foe.x, foe.y, m.range, colorOf(m.owner));
+    if (extra.length) fxHit(mode, m.x, m.y, foe.x, foe.y, m.range + RANGE_PAD, colorOf(m.owner));
   }
 }
 /* 行军兵打对面棋盘上的守军 */
@@ -1676,7 +1676,7 @@ function strikeDefender(m, tgt){
   if (mode !== 'single'){
     const extra = splashByMarcher(m, tgt);
     for (const t of extra) if (t.u.hp > 0) hitDef(t);
-    fxHit(mode, m.x, m.y, tgt.x, tgt.y, m.range, colorOf(m.owner));
+    fxHit(mode, m.x, m.y, tgt.x, tgt.y, m.range + RANGE_PAD, colorOf(m.owner));
   }
   if (Math.random() < 0.24) sfx('hit');
 }
@@ -1708,7 +1708,7 @@ function updateMarchers(dt){
     if (held){ strikeDefender(m, held); continue; }
 
     // 3) 射程内路上的守军 -> 边打边挪，打得起来就走得慢
-    const far = nearestDefender(defMine, m.x, m.y, m.range, true);
+    const far = nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD, true);
     if (far) strikeDefender(m, far);
 
     // 4) 待命兵：按格子排队。排头站出兵格的下一格，第二人站再后一格 …… 一格一个人；
@@ -1796,7 +1796,7 @@ function unitTarget(u, mine){
     if (e.hp <= 0 || e.owner !== S.foe) continue;
     if (mine ? (e.y < MID1) : (e.y > MID1)) continue;
     const d = Math.hypot(e.x - p.x, e.y - p.y);
-    if (d <= u.range && d < bd){ bd = d; best = e; }
+    if (d <= u.range + RANGE_PAD && d < bd){ bd = d; best = e; }
   }
   return best;
 }
@@ -1808,19 +1808,23 @@ function unitDmg(u, e, mine){
 }
 
 /* ---------------- 伤害形态：单体 / 穿刺 / 范围 ----------------
-   穿刺 = 「朝主目标的方向」一条线：只认投影为正、且横向偏移在半宽内的目标。
-   半宽取 34：约等于半个兵盘，斜侧一个身位的敌人扫得到，隔一排的扫不到。 */
+   射程补半格（RANGE_PAD）：判定按「格心距」，而守军永远站在路旁一格外面 ——
+   刀兵 1 格射程正好等于格心距，兵只在正对的那一瞬进圈，打一下就出去了（实际表现为「只打一次」）。
+   补半格后「N 格」= 覆盖到第 N 层的整格，与范围圈的画法一致。 */
+const RANGE_PAD = CELL * 0.5;
 const PIERCE_HALF_W = 34;
 function inCircle(ax, ay, bx, by, r){
   return Math.hypot(bx - ax, by - ay) <= r;
 }
-function inLine(ax, ay, bx, by, tx, ty, halfW){
+function inLine(ax, ay, bx, by, tx, ty, halfW, maxL){
   const dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
   if (L < 1e-6) return false;
   const ux = dx / L, uy = dy / L;
   const px = tx - ax, py = ty - ay;
-  if (px * ux + py * uy <= 0) return false;             // 在主目标反方向：不算
-  return Math.abs(px * -uy + py * ux) <= halfW;         // 横向偏移
+  const proj = px * ux + py * uy;
+  if (proj <= 0) return false;                           // 在主目标反方向：不算
+  if (maxL !== undefined && proj > maxL) return false;   // 超出射程：不算
+  return Math.abs(px * -uy + py * ux) <= halfW;          // 横向偏移
 }
 /* 守军这一击的额外目标（不含主目标） */
 function splashByDefender(u, tgt, mine){
@@ -1832,8 +1836,8 @@ function splashByDefender(u, tgt, mine){
     if (e === tgt || e.hp <= 0 || e.owner !== S.foe) continue;
     if (mine ? (e.y < MID1) : (e.y > MID1)) continue;    // 和索敌同一条：只打自己半场
     const hit = mode === 'aoe'
-      ? inCircle(p.x, p.y, e.x, e.y, u.range)
-      : inLine(p.x, p.y, tgt.x, tgt.y, e.x, e.y, PIERCE_HALF_W);
+      ? inCircle(p.x, p.y, e.x, e.y, u.range + RANGE_PAD)
+      : inLine(p.x, p.y, tgt.x, tgt.y, e.x, e.y, PIERCE_HALF_W, u.range + RANGE_PAD);
     if (hit) out.push(e);
   }
   return out;
@@ -1852,8 +1856,8 @@ function splashByMarcher(m, tgt){
     if (!defenderOnRoad(u, i, defMine)) continue;
     const p = unitPos(u, S.baseY);
     const hit = mode === 'aoe'
-      ? inCircle(m.x, m.y, p.x, p.y, m.range)
-      : inLine(m.x, m.y, tgt.x, tgt.y, p.x, p.y, PIERCE_HALF_W);
+      ? inCircle(m.x, m.y, p.x, p.y, m.range + RANGE_PAD)
+      : inLine(m.x, m.y, tgt.x, tgt.y, p.x, p.y, PIERCE_HALF_W, m.range + RANGE_PAD);
     if (hit) out.push({ u, x: p.x, y: p.y, idx: i });
   }
   return out;
@@ -1866,8 +1870,8 @@ function splashByMarcherDuel(m, foe){
   for (const o of G.marchers){
     if (o === m || o === foe || o.hp <= 0 || o.owner === m.owner) continue;
     const hit = mode === 'aoe'
-      ? inCircle(m.x, m.y, o.x, o.y, m.range)
-      : inLine(m.x, m.y, foe.x, foe.y, o.x, o.y, PIERCE_HALF_W);
+      ? inCircle(m.x, m.y, o.x, o.y, m.range + RANGE_PAD)
+      : inLine(m.x, m.y, foe.x, foe.y, o.x, o.y, PIERCE_HALF_W, m.range + RANGE_PAD);
     if (hit) out.push(o);
   }
   return out;
@@ -1919,7 +1923,7 @@ function updateSideUnits(dt, mine){
     if (mode !== 'single'){
       for (const e of splashByDefender(u, tgt, mine)) dealFrom(u, e, unitDmg(u, e, mine), mine);
       const ap = unitPos(u, S.baseY);
-      fxHit(mode, ap.x, ap.y, tgt.x, tgt.y, u.range, S.color);
+      fxHit(mode, ap.x, ap.y, tgt.x, tgt.y, u.range + RANGE_PAD, S.color);
     }
     u.cd = 1 / Math.max(0.3, u.rate);
     u.swing = 0.26;
@@ -4474,7 +4478,7 @@ window.__api = {
   partnersOf, aiCharSpot, aiJunkCharCell, aiEmptyLand, aiCharCount, aiCharWorth,
   aiTilePlaceable, AI_HOLD_FREE, AI_MAX_CHARS, AI_LEVELS, AIC, setAILevel, aiFlushHand,
   unitCells, unitPos, unitW, boardCount, eachUnit, clearCells, findHeroSpan, isAnchor,
-  hitModeOf, inLine, inCircle, splashByDefender, splashByMarcher, splashByMarcherDuel,
+  hitModeOf, inLine, inCircle, splashByDefender, splashByMarcher, splashByMarcherDuel, RANGE_PAD,
   isAduCell, inspectAt, closeInspect, makeInspect, statAtkOf, rateOf, rangeOf, spdOf, cellStr, spdStr,
   newUnit, fuseUnit, toUnitObject,
   autoFormHeroes, handSlotAt, handIndexAt, boardCellAt, toLogical, onDown, onMove, onUp,
