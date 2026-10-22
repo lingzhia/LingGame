@@ -816,23 +816,11 @@ function newGame(){
   // 武将文字池：每局洗一次，发完就没有了
   G.charPool = shuffleInPlace(HERO_CHAR_POOL0.slice());
 
-  // 开局白送一次征兵：前三个格子保底（刀/弓/铲），剩下两个随机发。
-  // 注意顺序：先摆保底再摸随机牌 —— 以前是先发 5 张再覆盖前三格，
-  // 被覆盖掉的那几张（可能是字牌）等于从字池里凭空蒸发了。
-  G.hand = [
-    { kind:'unit', type:'dao', char:'刀', level:1 },
-    { kind:'unit', type:'gong', char:'弓', level:1 },
-    { kind:'shovel' },
-  ];
-  for (let i = 3; i < HAND_N; i++) G.hand.push(rollTile());
-  // 电脑的开局手牌与玩家完全对称（同一套发牌 + 同一把保底铲子），
-  // 否则它第一手只能先花 5 个馒头去征兵，起步就比玩家少一整手。
-  G.ai.hand = [
-    { kind:'unit', type:'dao', char:'刀', level:1 },
-    { kind:'unit', type:'gong', char:'弓', level:1 },
-    { kind:'shovel' },
-  ];
-  for (let i = 3; i < HAND_N; i++) G.ai.hand.push(aiRollTile());
+  // 开局手牌全空：5 格留着虚框，玩家点一次「征兵」才有牌。
+  // 第一手固定 5 馒头（开局 8 馒头够付），之后每征一次 +1。
+  // 电脑同一套规则：空手牌 -> 第一个 aiTick 就自己征一次，不会白站着。
+  G.hand = new Array(HAND_N).fill(null);
+  G.ai.hand = new Array(HAND_N).fill(null);
   refreshBonds();
   return G;
 }
