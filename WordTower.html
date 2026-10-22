@@ -4230,6 +4230,7 @@ const NET = {
   ws:null,
   status:'',            // 服务器状态文案
   link:'idle',          // idle | connecting | online | offline
+  tries:0,              // 本次已自动重连几次
   rooms:[],             // 大厅房间列表
   listT:0,              // 大厅轮询计时
   peer:false,           // 对手是否在房间里
@@ -4347,18 +4348,31 @@ function drawOnline(){
   const st = NET.link;
   const col = st === 'online' ? '#2f7d4f' : st === 'connecting' ? '#b8860b'
     : st === 'offline' ? SEAL : INK3;
-  const txt = NET.status || '未连接';
+  const head = st === 'online' ? '服务器在线' : st === 'connecting' ? '连接中…'
+    : st === 'offline' ? '连不上服务器' : '未连接';
   ctx.beginPath(); ctx.arc(W/2 - 104, 720, 7, 0, Math.PI*2);
   ctx.fillStyle = col; ctx.fill();
   ctx.textAlign = 'left'; ctx.fillStyle = col; ctx.font = '20px ' + FONT;
-  ctx.fillText(txt, W/2 - 88, 720);
+  ctx.fillText(head, W/2 - 88, 720);
+  ctx.textAlign = 'center'; ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
   if (st === 'online'){
-    ctx.textAlign = 'center'; ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
     ctx.fillText('大厅里现在有 ' + NET.rooms.length + ' 个房间等待对手', W/2, 758);
+  } else if (st === 'offline'){
+    // 地址就在上面的输入框里，不必重复；这里只说「我在干什么」
+    ctx.fillText(NET.tries ? '正在自动重试 · ' + NET.tries + '/' + NET_RETRY.max
+                           : '点下面「重试连接」再试一次', W/2, 758);
   }
 
-  uiBtn('enterLobby', 80, 860, W-160, 92, '进入大厅',
-    st === 'online' ? 'primary' : 'off', st === 'online' ? '去建房或找房间' : '先连上服务器');
+  if (st === 'online'){
+    uiBtn('enterLobby', 80, 860, W-160, 92, '进入大厅', 'primary', '去建房或找房间');
+  } else if (st === 'connecting'){
+    uiBtn('enterLobby', 80, 860, W-160, 92, '进入大厅', 'off', '正在连接…');
+  } else {
+    // 连不上时把主按钮换成重试：这是此刻唯一有意义的动作
+    uiBtn('netRetry', 80, 860, W-160, 92, '重试连接',
+      st === 'offline' ? 'primary' : 'plain',
+      st === 'offline' ? '地址没变的话，确认 node server.js 还在跑' : '选个地址连一下');
+  }
   uiBtn('toHome', 80, 984, W-160, 70, '返回', 'plain');
 
   ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(90,80,65,0.5)'; ctx.font = '15px ' + FONT;
@@ -4589,7 +4603,11 @@ function makeNetInputs(){
 /* 改地址时别每敲一个字符就重连，停下来再连 */
 function scheduleConnect(){
   clearTimeout(connTimer);
-  connTimer = setTimeout(() => { if (NET.screen === 'online') netConnect(); }, 700);
+  connTimer = setTimeout(() => {
+    if (NET.screen !== 'online') return;
+    NET.tries = 0;                       // 换了地址就重新计数
+    netConnect();
+  }, 700);
 }
 function layoutNetInputs(){
   if (!addrInput) return;
@@ -4622,7 +4640,7 @@ function layoutNetInputs(){
 function showScreen(s){
   NET.screen = s;
   if (s === 'home'){ netClose(); NET.link = 'idle'; NET.status = ''; }
-  if (s === 'online'){ layoutKey = ''; netAutoConnect(); }
+  if (s === 'online'){ layoutKey = ''; NET.tries = 0; netAutoConnect(); }
   if (s === 'lobby'){ NET.panel = ''; NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0; netSend({ t:'list' }); }
   if (s === 'game'){ closeInspect(); G.dragger = null; UI_BTNS = []; }
   layoutKey = '';
@@ -4637,6 +4655,38 @@ function startSolo(){
 }
 
 /* ---------------- 网络 ---------------- */
+/* 后台标签页里的定时器会被浏览器节流到几十秒；切回前台时立刻补一次，
+   不然人看到的是「明明刚才是好的，怎么一回来就连不上」 */
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible') return;
+  if (NET.screen !== 'online' && NET.screen !== 'lobby') return;
+  if (NET.link === 'online' || NET.link === 'connecting') return;
+  clearRetry();
+  netConnect();
+});
+/* 连不上别只留一行红字：自动退避重试几次，再给一个手动重试按钮。
+   浏览器/系统偶发拒连（代理、休眠唤醒、后台标签页被节流）都靠这个兜回来。 */
+const NET_RETRY = { max:5, wait:[1200, 1800, 2600, 3600, 5000] };
+let retryTimer = null;
+function clearRetry(){
+  if (retryTimer){ clearTimeout(retryTimer); retryTimer = null; }
+}
+function scheduleRetry(msg){
+  clearRetry();
+  if (NET.screen !== 'online' && NET.screen !== 'lobby'){ NET.status = msg; return; }
+  if (NET.tries >= NET_RETRY.max){
+    NET.status = msg + ' · 重试 ' + NET_RETRY.max + ' 次都没成功';
+    return;
+  }
+  const wait = NET_RETRY.wait[Math.min(NET.tries, NET_RETRY.wait.length - 1)];
+  NET.tries++;
+  NET.status = msg + ' · 正在自动重试（' + NET.tries + '/' + NET_RETRY.max + '）';
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    if (NET.screen === 'online' || NET.screen === 'lobby') netConnect();
+  }, wait);
+}
+
 function netReady(){ return !!(NET.ws && NET.ws.readyState === 1); }
 function netSend(o){
   const ws = NET.ws;
@@ -4646,7 +4696,11 @@ function netSend(o){
 }
 function netClose(){
   NET.peer = false;
+  clearRetry();
   if (NET.ws){
+    NET.ws.onopen = null;
+    NET.ws.onmessage = null;
+    NET.ws.onerror = null;
     NET.ws.onclose = null;
     try { NET.ws.close(); } catch (e){}
   }
@@ -4660,13 +4714,17 @@ function netAutoConnect(){
 function netConnect(){
   NET.addr = inputVal(addrInput, NET.addr) || 'ws://localhost:8787';
   if (addrInput && addrInput.value !== NET.addr) addrInput.value = NET.addr;
+  const addr = NET.addr;
   netClose();
   NET.link = 'connecting'; NET.status = '连接中…';
   let ws;
-  try { ws = new WebSocket(NET.addr); }
-  catch (e){ NET.link = 'offline'; NET.status = '服务器地址格式不对'; return; }
+  try { ws = new WebSocket(addr); }
+  catch (e){ NET.link = 'offline'; NET.status = '服务器地址格式不对：' + addr; return; }
   NET.ws = ws;
+  let opened = false;
   ws.onopen = () => {
+    opened = true;
+    NET.tries = 0; clearRetry();
     NET.link = 'online'; NET.status = '服务器在线';
     ws.send(JSON.stringify({ t:'list' }));
     const nr = NET.pendingRoom;
@@ -4677,15 +4735,24 @@ function netConnect(){
         : { t:'join', room:nr, pwd:'' }));
     }
   };
-  ws.onerror = () => { NET.link = 'offline'; NET.status = '连不上 · 检查地址或服务器是否在跑'; };
-  ws.onclose = () => {
+  ws.onerror = () => {
+    if (NET.ws !== ws || opened) return;       // 已经换了新连接 / 连上之后再报错，交给 onclose
     NET.link = 'offline';
+    scheduleRetry('连不上 ' + addr);
+  };
+  ws.onclose = () => {
+    if (NET.ws !== ws) return;
     NET.peer = false;
+    if (!opened){ NET.link = 'offline'; scheduleRetry('连不上 ' + addr); return; }
+    NET.link = 'offline';
     if (NET.pvp){
       NET.status = '连接断开';
       if (G.phase !== 'over'){ G.phase = 'over'; G.result = 'lose'; toast('连接断开 · 本局判负'); }
-    } else if (NET.screen === 'online' || NET.screen === 'lobby' || NET.screen === 'room'){
-      NET.status = '连接已断开';
+    } else if (NET.screen === 'online' || NET.screen === 'lobby'){
+      NET.status = '连接已断开 · 正在自动重连…';
+      scheduleRetry('连接已断开');
+    } else {
+      NET.status = '连接已断开';       // 房间/对局中断线不自动重连，回去重进更干净
     }
   };
   ws.onmessage = ev => {
@@ -4880,6 +4947,7 @@ function screenButton(id){
     if (NET.link !== 'online') { toast('先连上服务器'); return; }
     NET.listT = 0; showScreen('lobby'); return;
   }
+  if (id === 'netRetry'){ NET.tries = 0; clearRetry(); NET.status = ''; netConnect(); return; }
 
   /* 大厅 */
   if (id === 'toOnline'){ showScreen('online'); return; }
