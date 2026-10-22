@@ -5026,7 +5026,14 @@ function netApplySide(d){
     const b = new Array(COLS*ROWS).fill(null);
     for (let i = 0; i < d.board.length; i++){
       const u = d.board[i];
-      if (u) b[mirrorCell(i)] = u;
+      if (!u) continue;
+      const j = mirrorCell(i);
+      b[j] = u;
+      /* 棋子内部的 cell/cells 还是发送方的格子编号 —— 不翻过来的话
+         isAnchor(u,i) 永远不成立（8 行镜像没有一格映射回自己），
+         整个敌方棋盘一格都画不出来，武将的位置也是错的。 */
+      u.cell = j;
+      if (Array.isArray(u.cells)) u.cells = u.cells.map(mirrorCell);
     }
     G.enBoard = b;
   }
