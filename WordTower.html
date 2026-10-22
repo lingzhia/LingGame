@@ -3878,14 +3878,14 @@ function drawDragger(){
   ctx.restore();
 }
 
-function drawToast(){
+function drawToast(yOverride){
   if (G.toastT <= 0) return;
   const a = clamp(G.toastT / 0.35, 0, 1);
   ctx.save();
   ctx.globalAlpha = a;
   ctx.font = '17px ' + FONT;
   const w = ctx.measureText(G.toast).width + 44;
-  const x = W/2 - w/2, y = (MID1 + MID2)/2 - 21;
+  const x = W/2 - w/2, y = (yOverride !== undefined ? yOverride : (MID1 + MID2)/2 - 21);
   ctx.fillStyle = 'rgba(43,38,32,0.86)';
   rr(ctx, x, y, w, 40, 20); ctx.fill();
   ctx.fillStyle = '#f6efe2'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -4236,6 +4236,9 @@ const NET = {
   ready:false,          // 我方是否已准备（客机）
   peerReady:false,      // 对手是否已准备（房主视角）
   panel:'',             // lobby 内的浮层：'' | create | pwd
+  panelMsg:'',          // 浮层里的即时反馈（不能只靠 toast：菜单屏原来不画 toast）
+  panelBad:false,       // panelMsg 是不是错误（红色）
+  waitT:0,              // 点了创建/加入后等服务器回包的计时（秒）
   formRoom:'', formPwd:'', formPriv:false,   // 建房表单
   joinNo:'',            // 大厅底部「输号加入」
   joinName:'',          // 待输密码的房间
@@ -4252,12 +4255,12 @@ let UI_BTNS = [];       // 当前屏幕上可点的按钮（每帧重填）
 const NET_UI = {
   addr:   { x:80, y:496, w:560, h:64 },
   joinNo: { x:80, y:1216, w:360, h:60 },
-  fRoom:  { x:150, y:528, w:420, h:60 },
-  fPwd:   { x:150, y:640, w:420, h:60 },
-  pwd:    { x:150, y:665, w:420, h:60 },
+  fRoom:  { x:150, y:504, w:420, h:60 },
+  fPwd:   { x:150, y:616, w:420, h:60 },
+  pwd:    { x:150, y:636, w:420, h:60 },
 };
 /* 大厅浮层的位置写死，输入框坐标按它对齐 */
-const PANEL = { create:{ y:396, h:500 }, pwd:{ y:513, h:340 } };
+const PANEL = { create:{ y:376, h:544 }, pwd:{ y:493, h:380 } };
 
 /* 两块棋盘是「行镜像」：我这边的 (col,row) 在对面就是 (col, 7-row) */
 function mirrorCell(idx){
@@ -4447,7 +4450,7 @@ function drawLobbyPanel(){
     ctx.fillText('房间号（别人靠它找到你）', 150, py + 104);
     ctx.fillText('房间密码（可留空）', 150, py + 216);
     /* 隐私房勾选 */
-    const cb = { x:150, y:py + 328, w:30, h:30 };
+    const cb = { x:150, y:py + 308, w:30, h:30 };
     UI_BTNS.push({ id:'togglePriv', r:{ x:cb.x-10, y:cb.y-12, w:cb.w+250, h:cb.h+26 } });
     ctx.strokeStyle = 'rgba(120,105,80,0.5)'; ctx.lineWidth = 2;
     rr(ctx, cb.x, cb.y, cb.w, cb.h, 6); ctx.stroke();
@@ -4464,8 +4467,16 @@ function drawLobbyPanel(){
     ctx.fillText('房间「' + NET.joinName + '」需要密码', 150, py + 108);
   }
 
-  uiBtn('doCreate', 150, py + ph - 100, 200, 74, create ? '创建' : '加入', 'primary');
-  uiBtn('closePanel', px + pw - 350, py + ph - 100, 200, 74, '取消', 'plain');
+  uiBtn('doCreate', 150, py + ph - 140, 200, 74, create ? '创建' : '加入', 'primary');
+  uiBtn('closePanel', 370, py + ph - 140, 200, 74, '取消', 'plain');
+
+  /* 浮层内的即时反馈：房间号没填、房间号被占用、服务器没回包都写在这里 */
+  if (NET.panelMsg){
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = NET.panelBad ? SEAL : INK3;
+    ctx.font = (NET.panelBad ? 'bold ' : '') + '16px ' + FONT;
+    ctx.fillText(NET.panelMsg, W/2, py + ph - 52);
+  }
 }
 
 /* ---------------- 房间等待界面 ---------------- */
@@ -4596,7 +4607,7 @@ function showScreen(s){
   NET.screen = s;
   if (s === 'home'){ netClose(); NET.link = 'idle'; NET.status = ''; }
   if (s === 'online'){ layoutKey = ''; netAutoConnect(); }
-  if (s === 'lobby'){ NET.panel = ''; netSend({ t:'list' }); }
+  if (s === 'lobby'){ NET.panel = ''; NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0; netSend({ t:'list' }); }
   if (s === 'game'){ closeInspect(); G.dragger = null; UI_BTNS = []; }
   layoutKey = '';
   layoutNetInputs();
@@ -4610,11 +4621,12 @@ function startSolo(){
 }
 
 /* ---------------- 网络 ---------------- */
+function netReady(){ return !!(NET.ws && NET.ws.readyState === 1); }
 function netSend(o){
   const ws = NET.ws;
-  if (!ws || ws.readyState !== 1) return;
+  if (!ws || ws.readyState !== 1) return false;
   const out = o.t ? o : { t:'relay', data:o };    // 带 t 的是协议消息，其余是游戏内通道
-  try { ws.send(JSON.stringify(out)); } catch (e){}
+  try { ws.send(JSON.stringify(out)); return true; } catch (e){ return false; }
 }
 function netClose(){
   NET.peer = false;
@@ -4669,6 +4681,7 @@ function netOnMessage(m){
     return;
   }
   if (m.t === 'created' || m.t === 'joined'){
+    NET.waitT = 0; NET.panelMsg = ''; NET.panelBad = false;
     NET.room = m.room;
     NET.role = m.t === 'created' ? 'host' : 'guest';
     NET.peer = !!m.peer;
@@ -4695,7 +4708,14 @@ function netOnMessage(m){
     return;
   }
   if (m.t === 'relay'){ netOnGame(m.data); return; }
-  if (m.t === 'err'){ NET.status = m.msg || '服务器拒绝'; toast(m.msg || '服务器拒绝'); return; }
+  if (m.t === 'err'){
+    NET.waitT = 0;
+    const msg = m.msg || '服务器拒绝';
+    NET.status = msg;
+    if (NET.panel){ NET.panelMsg = msg; NET.panelBad = true; }   // 浮层开着就写在浮层里
+    else toast(msg);
+    return;
+  }
 }
 /* 进房间（还没开局）：先摆一张干净空盘，看得见但动不了 */
 function enterRoom(){
@@ -4846,36 +4866,53 @@ function screenButton(id){
   if (id === 'refresh'){ netSend({ t:'list' }); return; }
   if (id === 'openCreate'){
     NET.panel = 'create'; NET.formRoom = NET.formPwd = ''; NET.formPriv = false;
+    NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0;
     if (fRoomInput) fRoomInput.value = '';
     if (fPwdInput) fPwdInput.value = '';
     layoutKey = ''; layoutNetInputs(); return;
   }
   if (id === 'togglePriv'){ NET.formPriv = !NET.formPriv; return; }
-  if (id === 'closePanel'){ NET.panel = ''; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = ''; return; }
+  if (id === 'closePanel'){
+    NET.panel = ''; NET.tmpPwd = ''; NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0;
+    if (pwdInput) pwdInput.value = ''; return;
+  }
   if (id === 'doCreate'){
     const nm = (NET.formRoom || '').trim();
-    if (!nm){ toast('先填房间号'); return; }
-    netSend({ t:'create', room:nm, pwd:(NET.formPwd || '').trim(), priv:NET.formPriv });
+    if (!nm){ NET.panelMsg = '请先填房间号'; NET.panelBad = true; return; }
+    if (!netReady()){ NET.panelMsg = '还没连上服务器 · 返回上一页重新连接'; NET.panelBad = true; return; }
+    const sent = netSend({ t:'create', room:nm, pwd:(NET.formPwd || '').trim(), priv:NET.formPriv });
+    if (!sent){ NET.panelMsg = '发送失败 · 连接已断开'; NET.panelBad = true; return; }
+    NET.panelMsg = '创建中…'; NET.panelBad = false; NET.waitT = 4;
     return;
   }
   if (id === 'doJoinPwd'){
+    if (!netReady()){ NET.panelMsg = '连接已断开'; NET.panelBad = true; return; }
     netSend({ t:'join', room:NET.joinName, pwd:(NET.tmpPwd || '').trim() });
+    NET.panelMsg = '加入中…'; NET.panelBad = false; NET.waitT = 4;
     NET.panel = ''; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = '';
     return;
   }
   if (id === 'joinByNo'){
     const nm = (NET.joinNo || '').trim();
     if (!nm){ toast('先填房间号'); return; }
+    if (!netReady()){ toast('连接已断开'); return; }
     const rm = NET.rooms.find(r => r.name === nm);
-    if (rm && rm.locked){ NET.joinName = nm; NET.panel = 'pwd'; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = ''; return; }
+    if (rm && rm.locked){ NET.joinName = nm; NET.panel = 'pwd'; NET.tmpPwd = '';
+      NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0;
+      if (pwdInput) pwdInput.value = ''; return; }
     netSend({ t:'join', room:nm, pwd:'' });
+    NET.waitT = 4;
     return;
   }
   if (id.indexOf('join:') === 0){
     const nm = id.slice(5);
     const rm = NET.rooms.find(r => r.name === nm);
-    if (rm && rm.locked){ NET.joinName = nm; NET.panel = 'pwd'; NET.tmpPwd = ''; if (pwdInput) pwdInput.value = ''; return; }
+    if (rm && rm.locked){ NET.joinName = nm; NET.panel = 'pwd'; NET.tmpPwd = '';
+      NET.panelMsg = ''; NET.panelBad = false; NET.waitT = 0;
+      if (pwdInput) pwdInput.value = ''; return; }
+    if (!netReady()){ toast('连接已断开'); return; }
     netSend({ t:'join', room:nm, pwd:'' });
+    NET.waitT = 4;
     return;
   }
 
@@ -4904,6 +4941,7 @@ function draw(){
     else if (NET.screen === 'lobby') drawLobby();
     else if (NET.screen === 'room') drawRoom();
     else drawHome();
+    drawToast(72);                    // 菜单屏也要能看见提示，否则出错像没反应
     return;
   }
   drawBg();
@@ -5240,6 +5278,14 @@ function loop(ts){
   last = ts;
   if (dt > 0.05) dt = 0.05;
   if (NET.screen !== 'game'){
+    if (G.toastT > 0) G.toastT -= dt;                       // 菜单屏的提示也要淡出
+    if (NET.waitT > 0){                                     // 建/加房间等回包，超时就明说
+      NET.waitT -= dt;
+      if (NET.waitT <= 0 && NET.screen === 'lobby' && NET.panel){
+        NET.panelMsg = '服务器没有回应 · 请确认服务器是当前版本（重启 node server.js）';
+        NET.panelBad = true;
+      }
+    }
     if (NET.screen === 'lobby' && NET.link === 'online'){   // 大厅：每 2 秒刷新一次房间列表
       NET.listT -= dt;
       if (NET.listT <= 0){ NET.listT = 2; netSend({ t:'list' }); }

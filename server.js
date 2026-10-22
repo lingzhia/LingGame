@@ -235,6 +235,9 @@ function onMessage(client, text, send, close){
     for (const c of r.clients) if (c !== client) sendTo(c, { t:'relay', data:m.data });
     return;
   }
+
+  /* 认不出的指令一律回一个错：老客户端配新服务器时，界面上才不会一片沉默 */
+  send({ t:'err', msg:'服务器不认识这条指令：' + String(m.t).slice(0, 20) });
 }
 
 httpServer.listen(PORT, () => {
