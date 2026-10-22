@@ -2762,6 +2762,16 @@ function drawGateMark(x, y, isEnemy){
 }
 
 /* 一块棋盘：先在底层铺出那条蛇形路，再逐格画可布防的地 */
+/* 斜纹填充：用来标「荒地 / 未开垦」，比纯色更能在小尺寸下区分 */
+function hatchCell(x, y, w, h, color, gap){
+  ctx.save();
+  rr(ctx, x, y, w, h, 9); ctx.clip();
+  ctx.strokeStyle = color; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let d = -h; d < w; d += gap){ ctx.moveTo(x + d, y); ctx.lineTo(x + d + h, y + h); }
+  ctx.stroke();
+  ctx.restore();
+}
 function drawBoardBase(baseY, board, isEnemy){
   const mine = !isEnemy;
   const cells = pathList(mine);
@@ -2816,17 +2826,21 @@ function drawBoardBase(baseY, board, isEnemy){
       const dg2 = G.dragger;
       const digging = mine && dg2 && dg2.moved && dg2.tile && dg2.tile.kind === 'shovel';
       if (locked){
-        ctx.fillStyle = 'rgba(125,156,90,0.10)';
+        /* 荒地：绿底 + 斜纹 + 虚线框。缩到小图也认得出「这格还没开垦」 */
+        ctx.fillStyle = digging ? 'rgba(184,134,11,0.16)' : 'rgba(125,156,90,0.20)';
         rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
-        ctx.strokeStyle = digging ? 'rgba(184,134,11,0.60)' : 'rgba(125,156,90,0.30)';
-        ctx.setLineDash([6,6]); ctx.lineWidth = digging ? 2 : 1.2;
+        hatchCell(x+3, y+3, CELL-6, CELL-6,
+                  digging ? 'rgba(184,134,11,0.45)' : 'rgba(104,134,74,0.34)', 9);
+        ctx.strokeStyle = digging ? 'rgba(184,134,11,0.85)' : 'rgba(104,134,74,0.62)';
+        ctx.setLineDash([6,5]); ctx.lineWidth = digging ? 2 : 1.6;
         rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.stroke();
         ctx.setLineDash([]);
       } else {
-        ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.045)' : 'rgba(255,255,255,0.52)';
+        /* 熟地（可放兵）：干净底色 + 实线框，和荒地的斜纹虚框形成对比 */
+        ctx.fillStyle = isEnemy ? 'rgba(176,58,46,0.09)' : 'rgba(255,255,255,0.62)';
         rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.fill();
-        ctx.strokeStyle = isEnemy ? 'rgba(176,58,46,0.20)' : 'rgba(90,80,65,0.20)';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = isEnemy ? 'rgba(176,58,46,0.45)' : 'rgba(90,80,65,0.30)';
+        ctx.lineWidth = 1.4;
         rr(ctx, x+3, y+3, CELL-6, CELL-6, 9); ctx.stroke();
       }
     }
@@ -4490,6 +4504,11 @@ function drawRecords(){
   if (total){
     ctx.fillText(`共 ${total} 局 · 占用约 ${Math.max(1, Math.round(recBytes(all)/1024))} KB`, W/2, 172);
     ctx.fillText(`超过 ${REC_MAX} 局或 ${REC_MAX_BYTES / 1048576} MB 时自动清理最旧的`, W/2, 200);
+    if (!LS_OK){
+      ctx.fillStyle = 'rgba(176,58,46,0.85)'; ctx.font = '15px ' + FONT;
+      ctx.fillText('浏览器禁用了本地存储 · 记录只保留在当前页面', W/2, 226);
+      ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
+    }
   } else {
     ctx.fillText('打完一局就会自动存在这里', W/2, 172);
   }
@@ -5367,13 +5386,13 @@ function draw(){
   drawInspectPanel();
 
   if (G.enemyBig) drawEnemyBig();     // 放大视图盖住上 2/3（只读，点一下收起）
-  drawToast();
 
   if (G.phase === 'intro') drawIntro();
   if (G.phase === 'shop') drawShop();
   if (G.phase === 'over') drawOver();
   if (G.paused) drawPause();
   if (REPLAY.on) drawReplayHud();
+  drawToast();                        // 提示永远在最上层（结算面板会盖住底下的东西）
 }
 
 /* ============================================================
@@ -5458,7 +5477,7 @@ function onDown(ev){
     if (G._replayBtn && inRect(p, G._replayBtn)){
       sfx('click');
       const rec = replayRecForOver();
-      if (!rec){ toast('这一局没有录像 · 无法回放'); return; }
+      if (!rec){ toast(LS_OK ? '这一局没有录像 · 无法回放' : '浏览器禁用存储 · 这一局没录上', SEAL); return; }
       startReplay(rec, 'over');
       return;
     }
@@ -5674,7 +5693,7 @@ function onUp(ev){
 function bindInput(){
   /* 输入先过一层录制：把落点记到当前逻辑步上（回放就靠这些点重演整局） */
   const wrap = (type, fn) => (ev) => {
-    if (!REPLAY.on && HAS_LS) recEvent(type, toLogical(ev));
+    if (!REPLAY.on) recEvent(type, toLogical(ev));
     fn(ev);
   };
   cv.addEventListener('pointerdown', wrap('down', onDown), { passive:false });
@@ -5709,14 +5728,18 @@ const REC_KEY = 'wt_record_v1';
    浏览器 localStorage 一般只有 5MB，留 2MB 给录像比较安全。 */
 const REC_MAX = 20;
 const REC_MAX_BYTES = 2 * 1024 * 1024;
-const HAS_LS = (() => { try { return !!window.localStorage; } catch(e){ return false; } })();
+/* 存储：localStorage 能用就落盘；被禁用（iframe 沙箱 / 隐私设置）时退到内存，
+   当前这个页面里照样能录、能回放，只是刷新即失 —— 不能因为存储不可用就把录制整个关掉。 */
+const HAS_LS = (() => { try { localStorage.getItem(REC_KEY); return true; } catch(e){ return false; } })();
+let LS_OK = HAS_LS;
+const REC_MEM = [];                        // 会话内存储（localStorage 不可用时的兜底）
 const REC = { on:false, seed:0, aiLevel:0, events:[], start:0 };
 let LAST_REC = null;                       // 刚结束的那一局（结算页「回放本局」用）
 const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null, back:'over' };
 let IN_HOOK = null;                        // 回放时把录好的坐标直接喂进输入层
 
 function recBegin(){
-  if (!HAS_LS || NET.pvp || REPLAY.on){ REC.on = false; return; }
+  if (NET.pvp || REPLAY.on){ REC.on = false; return; }
   REC.on = true; REC.seed = G.seed; REC.aiLevel = AI_LV; REC.events = []; REC.start = Date.now();
   SIM.n = 0; SIM.acc = 0;                  // 事件按「开战后的第几步」编号
 }
@@ -5725,25 +5748,37 @@ function recEvent(type, p){
   REC.events.push([SIM.n, type, Math.round(p.x), Math.round(p.y)]);
 }
 function recLoad(){
-  try { const s = localStorage.getItem(REC_KEY); return s ? (JSON.parse(s) || []) : []; } catch(e){ return []; }
+  if (LS_OK){
+    try {
+      const s = localStorage.getItem(REC_KEY);
+      return s ? (JSON.parse(s) || []) : [];
+    } catch(e){ LS_OK = false; }             // 读不了 → 之后一律走内存
+  }
+  return REC_MEM.slice();
+}
+/* 落盘（或落内存）。返回 false 表示这次没写进去，调用方继续缩小 keep 重试。 */
+function recStore(str, arr){
+  REC_MEM.length = 0;
+  for (const r of arr) REC_MEM.push(r);
+  if (!LS_OK) return true;                  // 内存已收下，够用了
+  try { localStorage.setItem(REC_KEY, str); return true; }
+  catch(e){ return false; }                 // 配额满：不算禁用，只是这一份太大
 }
 /* 存一局，顺手做自动清理：
    1) 条数超过 REC_MAX、或总量超过 REC_MAX_BYTES → 从最旧的开始丢
-   2) localStorage 真的写不进去（配额满）→ 再丢一局重试，直到能写或一局不剩
+   2) 写不进去（配额满）→ 再丢一局重试，直到能写或一局不剩
    旧录像优先被牺牲，最近的几局总会保住。 */
 function recSave(rec){
-  let arr;
-  try { arr = recLoad(); } catch(e){ return; }
+  const arr = recLoad();
   arr.push(rec);
   let keep = Math.min(arr.length, REC_MAX);        // 先按条数砍
   while (keep > 0){
-    const s = JSON.stringify(arr.slice(arr.length - keep));
-    if (s.length <= REC_MAX_BYTES){
-      try { localStorage.setItem(REC_KEY, s); return; } catch(e){ /* 配额不够，继续丢 */ }
-    }
+    const cand = arr.slice(arr.length - keep);
+    const str = JSON.stringify(cand);
+    if (str.length <= REC_MAX_BYTES && recStore(str, cand)) return;
     keep--;
   }
-  try { localStorage.removeItem(REC_KEY); } catch(e){}
+  recStore('[]', []);                              // 一局都不留也存不下：清空
 }
 /* 记录列表：新的在前 */
 function recAll(){
