@@ -4539,7 +4539,7 @@ function drawRecords(){
     ctx.font = 'bold 26px ' + FONT;
     ctx.fillText(win ? '胜' : (rec.result === 'lose' ? '负' : '未终'), r.x + 400, r.y + 36);
     ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
-    ctx.fillText(`${recDur(rec.time)} · ${rec.wave || 0} 波 · ${(rec.events || []).length} 步`,
+    ctx.fillText(`${recDur(rec.time)} · ${rec.wave || 0} 波 · ${recUpgrade(rec.events).length} 操作`,
                  r.x + 400, r.y + 72);
 
     ctx.fillStyle = 'rgba(120,105,80,0.55)'; ctx.font = '20px ' + FONT;
@@ -5691,15 +5691,21 @@ function onUp(ev){
 }
 
 function bindInput(){
-  /* 输入先过一层录制：把落点记到当前逻辑步上（回放就靠这些点重演整局） */
-  const wrap = (type, fn) => (ev) => {
-    if (!REPLAY.on) recEvent(type, toLogical(ev));
-    fn(ev);
-  };
-  cv.addEventListener('pointerdown', wrap('down', onDown), { passive:false });
-  cv.addEventListener('pointermove', wrap('move', onMove), { passive:false });
-  cv.addEventListener('pointerup', wrap('up', onUp), { passive:false });
-  cv.addEventListener('pointercancel', () => { G.dragger = null; });
+  /* 输入录制：只记「一次操作」 = 按下的点 → 松手的点。
+     中间那些 pointermove 全是过程噪声（一次拖拽几十条），既不进存档也不影响结果，
+     回放时把这两点喂回去，起手 / 落点一致，结局就一致。 */
+  let pressAt = null;
+  cv.addEventListener('pointerdown', ev => {
+    if (!REPLAY.on) pressAt = toLogical(ev);
+    onDown(ev);
+  }, { passive:false });
+  cv.addEventListener('pointermove', ev => { onMove(ev); }, { passive:false });
+  cv.addEventListener('pointerup', ev => {
+    if (!REPLAY.on && pressAt) recAction(pressAt, toLogical(ev));
+    pressAt = null;
+    onUp(ev);
+  }, { passive:false });
+  cv.addEventListener('pointercancel', () => { pressAt = null; G.dragger = null; });
   cv.addEventListener('contextmenu', e => e.preventDefault());
 
   // 键盘：空格 / P / Esc 暂停或继续，M 静音
@@ -5743,9 +5749,27 @@ function recBegin(){
   REC.on = true; REC.seed = G.seed; REC.aiLevel = AI_LV; REC.events = []; REC.start = Date.now();
   SIM.n = 0; SIM.acc = 0;                  // 事件按「开战后的第几步」编号
 }
-function recEvent(type, p){
+/* 一条操作 = 按下的点 → 松手的点（逻辑坐标，整数，与窗口大小无关） */
+function recAction(from, to){
   if (!REC.on) return;
-  REC.events.push([SIM.n, type, Math.round(p.x), Math.round(p.y)]);
+  REC.events.push([SIM.n, Math.round(from.x), Math.round(from.y),
+                   Math.round(to.x), Math.round(to.y)]);
+}
+/* 旧格式（逐帧指针轨迹 [tick, 'down'|'move'|'up', x, y]）→ 新格式（一次操作一条）。
+   只取每对 down/up 的起点与终点，move 全部丢弃。 */
+function recUpgrade(evs){
+  if (!evs || !evs.length) return [];
+  if (typeof evs[0][1] === 'number') return evs;      // 已是新格式
+  const out = [];
+  let press = null;
+  for (const e of evs){
+    if (e[1] === 'down') press = e;
+    else if (e[1] === 'up' && press){
+      out.push([e[0], press[2], press[3], e[2], e[3]]);
+      press = null;
+    }
+  }
+  return out;
 }
 function recLoad(){
   if (LS_OK){
@@ -5794,7 +5818,7 @@ function recFinish(){
   if (!REC.on) return;
   REC.on = false;
   if (!REC.events.length) return;          // 一步没动过，不留记录
-  LAST_REC = { ts:Date.now(), mode:'solo', seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
+  LAST_REC = { v:2, ts:Date.now(), mode:'solo', seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
                time:+G.time.toFixed(1), wave:G.wave, events:REC.events };
   recSave(LAST_REC);
 }
@@ -5815,9 +5839,9 @@ function replayRecForOver(){
 function startReplay(rec, back){
   if (!rec || !rec.events || !rec.events.length){ toast('这一局没有可回放的操作'); return; }
   REPLAY.back = back || 'over';
-  REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
+  REPLAY.rec = rec; REPLAY.ev = recUpgrade(rec.events); REPLAY.i = 0;
   REPLAY.speed = 2; REPLAY.dispatching = false;
-  const lastTick = rec.events[rec.events.length - 1][0];
+  const lastTick = REPLAY.ev.length ? REPLAY.ev[REPLAY.ev.length - 1][0] : 0;
   REPLAY.limit = lastTick + 60 * 120;      // 保险：最多再跑 2 分钟
   try {
     newGame(rec.seed >>> 0);
@@ -5843,11 +5867,16 @@ function replayDispatch(type, x, y){
     else onUp(ev);
   } finally { IN_HOOK = null; REPLAY.dispatching = false; }
 }
+function replayAction(x0, y0, x1, y1){
+  replayDispatch('down', x0, y0);
+  if (x0 !== x1 || y0 !== y1) replayDispatch('move', x1, y1);   // 真的拖过才补这一下
+  replayDispatch('up', x1, y1);
+}
 function replayPump(){
   if (!REPLAY.on) return;
   while (REPLAY.i < REPLAY.ev.length && REPLAY.ev[REPLAY.i][0] <= SIM.n){
-    const e = REPLAY.ev[REPLAY.i++];
-    replayDispatch(e[1], e[2], e[3]);
+    const a = REPLAY.ev[REPLAY.i++];
+    replayAction(a[1], a[2], a[3], a[4]);
   }
   if (G.phase === 'over' || SIM.n > REPLAY.limit) stopReplay(true);
 }
