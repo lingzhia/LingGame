@@ -67,14 +67,17 @@
 
 | 命令 | 作用 |
 |---|---|
-| `newGame {seed, aiLevel}` | 开新局；seed 固定 → 地图/波次完全可复现 |
+| `newGame {seed, aiLevel}` | 开新局；seed 固定 → 地图/波次/征兵/商店完全可复现 |
 | `snapshot` | 读全量状态 |
-| `place {handIdx, c, r}` | 摆兵 |
-| `move / fuse / recycle` | 移动 / 合成 / 回收 |
+| `place {hand, c, r}` | 手牌摆兵（失败自动放回，返回 `ok:false`） |
+| `move {from, to}` | 盘上移动 / 拖叠合成 |
+| `fuse {a, b}` | 兵营内两张牌合成 |
+| `recycle {c, r}` | 遣散守军按 `recycleValue` 折馒头 |
+| `road {hand}` | 手牌兵上路排队（等价拖到路格） |
 | `enlist` | 征兵刷新 5 格手牌 |
-| `shop {buy id}` / `useActive {slot}` | 商店与技能 |
-| `startWave` / `tick {seconds}` | 开波 / 按 0.1s 固定步长推进时间，可跳到任意时刻 |
-| `pause / set` | 暂停、改数值（测试用，如加馒头） |
+| `shop {buy id}` / `shop {close}` / `useActive {slot}` | 商店与技能 |
+| `tick {sec}` / `tick {to}` | 按 0.1s 固定步长推进时间；商店冻结时间需显式 close（与真人一致） |
+| `startWave / pause / set` | 辅助命令；`set` 白名单改数值（测试用） |
 
 ## 六、对局记录（存档）
 
@@ -117,3 +120,16 @@
 | eval 整个 IIFE 环境差异 | 缺失全局对象全部补桩；失败即报错退出 |
 | 确定性被破坏（浮点/遍历顺序） | 固定 0.1s 步长；重放结果不一致视为 bug 修掉 |
 | 正常游戏受影响 | 出口仅在 `window.__WT_HEADLESS__` 已设置时激活，画面版零变化 |
+
+## 九、实施结果（2026-10-22 完成）
+
+- `WordTower.html`：新增 `snapshotData()`、`recycleCell()`、`__api` 补导出；`newGame(seed)` 接受种子。
+- **玩法随机全部种子化**：新增全局 `gRnd`（有种子时 = mulberry32(seed)），征兵/字池/商店/AI 抽牌/来兵等 15 处玩法随机从 `Math.random()` 换成 `gRnd()`（视觉粒子与音效随机保留原样）。无种子时 `gRnd = Math.random`，行为分布不变，正常游戏零差异——一套规则，多种呈现。
+- `headless.js`：桩层（canvas Proxy/AudioContext/rAF 空转/DOM）+ 三种模式 + 存档。
+- 已验证：同 seed 同操作两遍 → 快照逐字节相同；存档重放 → 结果与终局快照完全一致；完整对局跑通（newGame → 征兵摆兵 → tick → 商店 → 胜负判定）。
+- 快速上手：
+  ```
+  printf '%s\n' '{"op":"newGame","seed":42}' '{"op":"enlist"}' \
+    '{"op":"place","hand":0,"c":3,"r":1}' '{"op":"tick","sec":10}' '{"op":"snapshot"}' \
+    | node headless.js
+  ```

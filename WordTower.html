@@ -102,6 +102,7 @@ let ADU_M = { x: 0, y: 0, r: ADU_R }, ADU_E = { x: 0, y: 0, r: ADU_R };
 
 let mapRnd = Math.random;            // 地图专用的随机源（可换种子复现）
 let fixedSeed = null;
+let gRnd = Math.random;              // 对局随机源：征兵/商店/AI 抽牌/来兵等玩法随机都走它，有种子即可整局复现
 function mulberry32(a){
   return function(){
     a = a + 0x6D2B79F5 | 0;
@@ -502,7 +503,7 @@ const HERO_CHAR_POOL0 = [];
 for (const n in HEROES) HERO_CHAR_POOL0.push(HEROES[n].a, HEROES[n].b);
 function shuffleInPlace(a){
   for (let i = a.length - 1; i > 0; i--){
-    const j = (Math.random() * (i + 1)) | 0;
+    const j = (gRnd() * (i + 1)) | 0;
     const t = a[i]; a[i] = a[j]; a[j] = t;
   }
   return a;
@@ -531,9 +532,9 @@ function drawPoolChar(preferGold){
   if (preferGold){
     const g = [];
     for (let i = 0; i < pool.length; i++) if (GOLD_CHARS.indexOf(pool[i]) >= 0) g.push(i);
-    if (g.length) idx = g[(Math.random() * g.length) | 0];
+    if (g.length) idx = g[(gRnd() * g.length) | 0];
   }
-  if (idx < 0) idx = (Math.random() * pool.length) | 0;
+  if (idx < 0) idx = (gRnd() * pool.length) | 0;
   return pool.splice(idx, 1)[0];
 }
 
@@ -568,7 +569,7 @@ const SHOP_POOL = ['shenbing','dabowu','maobi','zhaoxian','nongmin','luoyang','b
 
 /* ---------------- 工具 ---------------- */
 const clamp = (v,a,b) => v < a ? a : (v > b ? b : v);
-const pick  = a => a[(Math.random()*a.length)|0];
+const pick  = a => a[(gRnd()*a.length)|0];
 const rnd   = (a,b) => a + Math.random()*(b-a);
 function rr(c,x,y,w,h,r){
   c.beginPath();
@@ -769,11 +770,15 @@ function autoFormHeroes(board, mine){
   return formed;
 }
 
-function newGame(){
+function newGame(seed){
+  if (seed !== undefined && seed !== null) fixedSeed = (seed | 0) >>> 0;
+  // 对局随机源：有种子（?seed= / 联机 / headless）时整局玩法随机完全可复现
+  gRnd = (fixedSeed === null || fixedSeed === undefined) ? Math.random : mulberry32(((fixedSeed | 0) ^ 0x5f3759df) >>> 0);
   G = {
     phase:'intro',          // intro | prep | battle | shop | over
     paused:false,           // 手动暂停：全场冻结
     vsAI:true,              // 人机对战（可暂停）／将来真人对战置 false 即禁用暂停
+    seed:(fixedSeed === null || fixedSeed === undefined) ? null : (fixedSeed >>> 0),
     t:0, time:0,
     mantou:8,               // 开局军费：刚好够征一次兵
     enlistCost:5,           // 征兵费：5 起，每征一次 +1，只涨不降
@@ -904,9 +909,9 @@ function burst(x, y, n, color){
    手里凭空冒出一张 2、3 级牌，会让「合成」这条主线变得没意义，
    也会让脸黑的玩家整局 1 级打 3 级。双方同一条发牌表。 */
 function rollTile(){
-  const r = Math.random();
+  const r = gRnd();
   if (r < SHOVEL_RATE) return { kind:'shovel' };
-  if (Math.random() < 0.30){
+  if (gRnd() < 0.30){
     const ch = pickHeroChar();
     if (ch) return { kind:'char', char: ch };     // 池子空了就改发兵
   }
@@ -925,7 +930,7 @@ function pickHeroChar(){
   for (const t of G.hand) if (t && t.kind==='char') held.push(t.char);
   for (const u of G.board) if (u && u.kind==='char') held.push(u.char);
 
-  if (held.length && Math.random() < 0.66){
+  if (held.length && gRnd() < 0.66){
     const cand = [];
     for (const c of held){
       for (const n of GOLD_HEROES){
@@ -939,7 +944,7 @@ function pickHeroChar(){
       if (takePoolChar(c)) return c;
     }
   }
-  return drawPoolChar(Math.random() < (G.passive.zhaoxian ? 0.88 : 0.74));
+  return drawPoolChar(gRnd() < (G.passive.zhaoxian ? 0.88 : 0.74));
 }
 
 /* 旧字牌回收价值：等级越高回收越多（原版：点征兵会自动回收旧兵） */
@@ -949,6 +954,18 @@ function recycleValue(t){
   if (t.kind === 'hero')  return 2 + (t.level - 1) * 2;   // 名将 2/4/6
   if (t.kind === 'char')  return 1;
   return 1;                                               // 铲子
+}
+
+/* 遣散棋盘上的守军，按回收价折成馒头（headless 数据模式的 recycle 命令走这里，
+   价目与征兵折算同一张表 recycleValue） */
+function recycleCell(idx){
+  const u = G.board[idx];
+  if (!u) return 0;
+  const v = recycleValue(u);
+  clearCells(G.board, idx);
+  refreshBonds();
+  G.mantou += v;
+  return v;
 }
 
 /* 兵营是「固定 5 个格子」，不是队列：用掉一格就留个空洞，
@@ -1409,7 +1426,7 @@ function waveRnd(n, i, salt){
 function enemySpec(n, i, salt){
   const lv = waveTier(n);
   const seeded = (fixedSeed !== null && fixedSeed !== undefined);
-  const r = seeded ? waveRnd(n, i | 0, salt | 0) : Math.random();
+  const r = seeded ? waveRnd(n, i | 0, salt | 0) : gRnd();
   let key;
   if (n <= 2)      key = r < 0.55 ? 'dao' : (r < 0.85 ? 'qiang' : (r < 0.95 ? 'gong' : 'qi'));
   else if (n <= 5) key = r < 0.34 ? 'dao' : (r < 0.62 ? 'qiang' : (r < 0.84 ? 'gong' : 'qi'));
@@ -2119,8 +2136,8 @@ function aiGain(v, x, y){
 function aiKillReward(e){ return e.mantou * aiMantouMul(); }
 /* 电脑抽牌：与玩家同一张掉落表 */
 function aiRollTile(){
-  if (Math.random() < SHOVEL_RATE) return { kind:'shovel' };
-  if (Math.random() < 0.28){
+  if (gRnd() < SHOVEL_RATE) return { kind:'shovel' };
+  if (gRnd() < 0.28){
     const ch = pickHeroCharAI();
     if (ch) return { kind:'char', char: ch };
   }
@@ -2141,7 +2158,7 @@ function pickHeroCharAI(){
   const held = [];
   for (const t of G.ai.hand) if (t && t.kind === 'char') held.push(t.char);
   for (const u of G.enBoard) if (u && u.kind === 'char') held.push(u.char);
-  if (held.length && Math.random() < 0.66){
+  if (held.length && gRnd() < 0.66){
     const cand = [];
     for (const c of held){
       const p = partnerOf(c);
@@ -2152,7 +2169,7 @@ function pickHeroCharAI(){
       if (takePoolChar(c)) return c;
     }
   }
-  return drawPoolChar(Math.random() < (G.ai.passive.zhaoxian ? 0.88 : 0.74));
+  return drawPoolChar(gRnd() < (G.ai.passive.zhaoxian ? 0.88 : 0.74));
 }
 /* 电脑征兵：直接调用与玩家同一个 enlistSide()，只有飘字/音效是各自的 */
 function aiEnlist(){
@@ -2164,7 +2181,7 @@ function aiEnlist(){
 /* 电脑也逛自己的商店：同一张道具表、同一套价格与上限（主动最多 2 件） */
 function aiShop(){
   const pool = SHOP_POOL.slice(), stock = [];
-  for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((Math.random()*pool.length)|0,1)[0]);
+  for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((gRnd()*pool.length)|0,1)[0]);
   for (const id of stock){
     const it = ITEMS[id];
     if (G.ai.mantou < it.cost) continue;
@@ -2483,7 +2500,7 @@ function openShop(){
   aiShop();                 // 电脑同时逛自己的商店（各买各的）
   const pool = SHOP_POOL.slice();
   const stock = [];
-  for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((Math.random()*pool.length)|0,1)[0]);
+  for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((gRnd()*pool.length)|0,1)[0]);
   G.shopStock = stock;
   G.shopBought = false;
   G.phase = 'shop';
@@ -5619,9 +5636,66 @@ function boot(){
   requestAnimationFrame(loop);
 }
 
+/* ============================================================
+   Headless 数据快照：整个战局的结构化 JSON。
+   画面只是这些数据的呈现 —— agent 读它 = 看画面，操作数据 = 操作游戏。
+   每格三要素：坐标 (c,r,idx) / 状态 land|path|adu / 对象 unit。
+   ============================================================ */
+function tileOut(t){
+  if (!t) return null;
+  if (t.kind === 'shovel') return { kind:'shovel' };
+  if (t.kind === 'char')   return { kind:'char', char:t.char };
+  return { kind:t.kind, type:t.type, level:t.level };
+}
+function unitOut(u){
+  if (!u) return null;
+  const o = { kind:u.kind, type:u.type, char:u.char, level:u.level,
+              hp:u.hp, maxHp:u.maxHp, atk:u.atk, rate:u.rate, range:u.range,
+              cells:u.cells ? u.cells.slice() : undefined };
+  if (u.kind === 'hero'){ o.rank = u.rank; o.xp = u.xp; o.skill = u.skill; }
+  if (u.vs && u.vs.length) o.vs = u.vs;
+  return o;
+}
+function boardOut(board, mine){
+  const out = [];
+  for (let i = 0; i < COLS*ROWS; i++){
+    const st = isAduCell(i, mine) ? 'adu' : (isPathCell(i, mine) ? 'path' : 'land');
+    const canPlace = st === 'land' && !board[i] && (mine ? !!G.unlocked[i] : aiLandOK(i));
+    out.push({ c:colOf(i), r:rowOf(i), idx:i, state:st, canPlace, unit:unitOut(board[i]) });
+  }
+  return out;
+}
+function snapshotData(){
+  return {
+    seed:G.seed, phase:G.phase, paused:!!G.paused, pvp:!!NET.pvp,
+    time:+G.time.toFixed(2), wave:G.wave,
+    nextWaveIn:+Math.max(0, WAVE_GAP - G.waveT).toFixed(2),
+    prepT:(G.phase === 'prep') ? +G.prepT.toFixed(2) : undefined,
+    me:{ mantou:G.mantou, enlistCost:G.enlistCost, life:G.myLife, maxLife:G.myMax,
+         merit:G.merit, meritNeed:G.meritNeed, kills:G.kills, leaks:G.leaks,
+         unlocked:Object.keys(G.unlocked).length,
+         hand:G.hand.map(tileOut), actives:G.actives.slice(),
+         passive:Object.assign({}, G.passive) },
+    ai:{ mantou:G.ai.mantou, life:G.enLife, maxLife:G.enMax,
+         merit:G.ai.merit, meritNeed:G.ai.meritNeed, kills:G.ai.kills, leaks:G.aiLeaks,
+         hand:G.ai.hand.map(tileOut) },
+    myBoard:boardOut(G.board, true),      // 我方半场：c/r 按我方视角（和画面一致）
+    aiBoard:boardOut(G.enBoard, false),   // 敌方半场：c/r 按敌方视角（画面上是对面镜像）
+    marchers:G.marchers.map(m => ({
+      owner:m.owner, key:m.key, name:m.name, level:m.level, elite:m.elite,
+      hp:m.hp, maxHp:m.maxHp, atk:+m.atk.toFixed(1),
+      x:Math.round(m.x), y:Math.round(m.y),
+      ri:m.ri, routeLen:m.route ? m.route.length : 0, queued:!!m.queued,
+    })),
+    shop:{ open:G.shopOpen || G.phase === 'shop', stock:G.shopStock.slice(), bought:G.shopBought },
+    result:G.result,
+  };
+}
+
 /* 无头 / 自动化测试钩子 */
 window.__api = {
   newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
+  snapshotData, recycleCell,
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
   castSkill, openShop, closeShop, nextShopWave, ITEMS, endGame, recycleValue,
   setPaused, togglePause, pauseAction, canPause, BTN_PAUSE,
