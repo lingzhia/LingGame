@@ -1760,8 +1760,14 @@ function hitAdu(side){
     G.myLife--; G.leaks++; G.aduHurtM = 0.45; sfx('lost');
     burst(ADU_M.x, ADU_M.y, 30, SEAL);
     floater(ADU_M.x, ADU_M.y - 58, '主公 −1 命', SEAL);
-    if (G.myLife <= 0) endGame(false);
+    if (G.myLife <= 0 && !NET.pvp) endGame(false);   // 联机：等房主统一裁决，不自己判
   } else {
+    if (NET.pvp){                                    // 联机：对面的血由对面自己算并推过来
+      G.aduHurtE = 0.45; sfx('hero');
+      burst(ADU_E.x, ADU_E.y, 30, GOLD);
+      floater(ADU_E.x, ADU_E.y - 58, '敌军触城', GOLD);
+      return;
+    }
     G.enLife--; G.aiLeaks++; G.aduHurtE = 0.45; sfx('hero');
     burst(ADU_E.x, ADU_E.y, 30, GOLD);
     if (G.enLife <= 0) endGame(true);
@@ -4026,18 +4032,20 @@ function drawShop(){
 /* ---------------- 结算 ---------------- */
 function drawOver(){
   ctx.fillStyle = 'rgba(28,26,23,0.66)'; ctx.fillRect(0,0,W,H);
-  const win = G.result === 'win';
+  const win = G.result === 'win', draw = G.result === 'draw';
   const pw = 560, ph = 508, px = (W-pw)/2, py = (H-ph)/2;
   ctx.fillStyle = PAPER_L;
   rr(ctx, px, py, pw, ph, 18); ctx.fill();
-  ctx.strokeStyle = win ? GOLD : SEAL; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.strokeStyle = win ? GOLD : (draw ? INK3 : SEAL); ctx.lineWidth = 2.5; ctx.stroke();
 
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = win ? '#8a5a06' : SEAL;
+  ctx.fillStyle = win ? '#8a5a06' : (draw ? INK2 : SEAL);
   ctx.font = '46px ' + FONT;
-  ctx.fillText(win ? '杀 出 重 围' : '主 公 失 守', W/2, py + 80);
+  ctx.fillText(win ? '杀 出 重 围' : draw ? '两 败 俱 伤' : '主 公 失 守', W/2, py + 80);
   ctx.fillStyle = INK2; ctx.font = '16px ' + FONT;
-  ctx.fillText(win ? '敌军攻势溃散，主公无恙' : '敌将破阵而入，中军已破', W/2, py + 124);
+  ctx.fillText(win ? (NET.pvp ? '对手主公先失守，本局你胜' : '敌军攻势溃散，主公无恙')
+    : draw ? '双方主公同时失守，本局作和'
+    : (NET.pvp ? '你方主公先失守，本局你负' : '敌将破阵而入，中军已破'), W/2, py + 124);
 
   const rows = [
     ['坚守波次', G.wave + ' 波'],
@@ -4062,7 +4070,7 @@ function drawOver(){
   bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
   ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
   ctx.fillStyle = '#fff6ee'; ctx.font = '23px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('再 战 一 局', W/2, b.y + b.h/2 + 1);
+  ctx.fillText(NET.pvp ? '返 回 首 页' : '再 战 一 局', W/2, b.y + b.h/2 + 1);
 }
 
 /* ---------------- 暂停面板 ---------------- */
@@ -4341,7 +4349,10 @@ function netConnect(role){
   ws.onerror = () => { NET.status = '连不上 · 检查地址与服务器是否在跑'; };
   ws.onclose = () => {
     NET.peer = false;
-    if (NET.pvp){ NET.status = '连接断开'; G.phase = 'over'; }
+    if (NET.pvp){
+      NET.status = '连接断开';
+      if (G.phase !== 'over'){ G.phase = 'over'; G.result = 'lose'; toast('连接断开 · 本局判负'); }
+    }
     else if (NET.screen === 'online') NET.status = '连接已断开';
   };
   ws.onmessage = ev => {
@@ -4360,6 +4371,9 @@ function netOnMessage(m){
     if (NET.role === 'host') pvpHostStart();
   } else if (m.t === 'relay'){
     netOnGame(m.data);
+  } else if (m.t === 'peerleft'){
+    NET.peer = false;
+    if (NET.pvp && G.phase !== 'over'){ G.phase = 'over'; G.result = 'win'; toast('对手离开 · 本局判胜'); }
   } else if (m.t === 'err'){
     NET.status = m.msg || '服务器拒绝：房间已满';
   }
@@ -4390,6 +4404,22 @@ function netOnGame(d){
   if (!NET.pvp) return;
   if (d.k === 'side') netApplySide(d);
   else if (d.k === 'raid') netApplyRaid(d);
+  else if (d.k === 'over') netApplyOver(d.winner);
+}
+/* 终局裁定：命只由自己掉自己上报，所以房主手里的两个数（我的 myLife + 对面推来的 enLife）
+   就是两边唯一的真相。由房主算一次、发一次，客机照办 —— 不会出现两边各判各的。 */
+function netCheckOver(){
+  if (!NET.pvp || NET.role !== 'host' || G.phase === 'over') return;
+  const me = G.myLife, foe = G.enLife;
+  if (me > 0 && foe > 0) return;
+  const winner = (me <= 0 && foe <= 0) ? 'draw' : (me <= 0 ? 'guest' : 'host');
+  netSend({ k:'over', winner });
+  netApplyOver(winner);
+}
+function netApplyOver(winner){
+  if (G.phase === 'over') return;
+  if (winner === 'draw'){ G.phase = 'over'; G.result = 'draw'; sfx('lost'); return; }
+  endGame(winner === NET.role);
 }
 /* 把自己这一侧的盘面推给对面（操作后立刻推一次，平时 0.4s 补一次） */
 function netPushSide(){
@@ -4401,6 +4431,7 @@ function netPushSide(){
     unlocked: G.unlocked,
     mantou: G.mantou,
     lives: G.myLife,
+    max: G.myMax,
   });
 }
 /* 收到对面盘面：镜像到自己的敌方棋盘 */
@@ -4421,6 +4452,7 @@ function netApplySide(d){
   }
   if (typeof d.mantou === 'number') G.ai.mantou = d.mantou;
   if (typeof d.lives === 'number') G.enLife = d.lives;
+  if (typeof d.max === 'number') G.enMax = d.max;
   refreshAiBonds();
 }
 /* 对手把兵派上路：在镜像格上生成一个敌方行军兵 */
@@ -4545,7 +4577,15 @@ function onDown(ev){
     return;
   }
   if (G.phase === 'over'){
-    if (G._againBtn && inRect(p, G._againBtn)){ sfx('click'); newGame(); startBattle(); }
+    if (G._againBtn && inRect(p, G._againBtn)){
+      sfx('click');
+      if (NET.pvp){                       // 联机不在这里重开：两边各重开就散了，回首页重新配对
+        netClose(); NET.pvp = false; NET.started = false; NET.seen = {};
+        showScreen('home');
+        return;
+      }
+      newGame(); startBattle();
+    }
     return;
   }
   if (G.phase === 'shop'){
@@ -4779,7 +4819,7 @@ function loop(ts){
   if (G.paused){ draw(); requestAnimationFrame(loop); return; }   // 暂停：全局冻结，只重绘
   G.t += dt;
   step(dt);
-  if (NET.pvp){ NET.pushT -= dt; if (NET.pushT <= 0){ NET.pushT = 0.4; netPushSide(); } }
+  if (NET.pvp){ NET.pushT -= dt; if (NET.pushT <= 0){ NET.pushT = 0.4; netPushSide(); } netCheckOver(); }
   if (G.toastT > 0) G.toastT -= dt;
   if (G.aduShield > 0) G.aduShield -= dt;
   if (G.aduHurtM > 0) G.aduHurtM -= dt;
@@ -4828,6 +4868,7 @@ window.__api = {
   unitCells, unitPos, unitW, boardCount, eachUnit, clearCells, findHeroSpan, isAnchor,
   hitModeOf, inLine, inCircle, splashByDefender, splashByMarcher, splashByMarcherDuel, RANGE_PAD,
   NET, showScreen, startSolo, pvpStart, pvpHostStart, netApplySide, netApplyRaid, netPushSide,
+  netCheckOver, netApplyOver, hitAdu, endGame,
   mirrorCell, screenButton, makeNetInputs, layoutNetInputs, netOnMessage, netOnGame, netConnect, netClose,
   get UI_BTNS(){ return UI_BTNS; },
   isAduCell, inspectAt, closeInspect, makeInspect, statAtkOf, rateOf, rangeOf, spdOf, cellStr, spdStr,
