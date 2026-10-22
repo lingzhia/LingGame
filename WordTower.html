@@ -1152,7 +1152,6 @@ function dropOnCellRaw(src, idx){
     if (idx === PATH_CELLS_M[0]){ toast('出兵格要空着 · 兵排它后面一格起'); sfx('hit'); return 'fail'; }
     const m = spawnRaider('me', idx, src.type, src.level);
     if (!m){ toast('这一格不适合出击'); sfx('hit'); return 'fail'; }
-    if (NET.pvp) netSend({ k:'raid', cell:idx, type:src.type, level:src.level, rid:++NET.seq });
     if (from !== undefined){ clearCells(G.board, from); refreshBonds(); }
     const u = UNITS[src.type];
     burst(m.x, m.y, 14, GOLD);
@@ -1361,6 +1360,12 @@ function startWave(early){
   G.waveT = 0;
   // 开战的同时放行上一波之间攒下的待命兵：它们跟着这一波一起压上去
   const freed = releaseQueue();
+  /* 联机：没有电脑波次，也没有商店（商店会冻结时间，两边进店时机不同就脱节）。
+     「波」在这里只剩一个作用 —— 定期放行排队中的待命兵。 */
+  if (NET.pvp){
+    if (freed) toast('第 ' + G.wave + ' 批 · 待命 ' + freed + ' 兵出击');
+    return;
+  }
   // 注意：这里**不能**把征兵费重置回 5 —— 原来就是这一行让成本涨不上去的。
   // 现在征兵费只升不降：开局 5，每征一次 +1，越到后期越贵。
   if (G.passive.luoyang) handAdd({ kind:'shovel' });
@@ -1457,6 +1462,7 @@ function spawnRaider(owner, cell, key, level){
   m.y = cellCY(colOf(cell), rowOf(cell), baseY);
   m.route = raiderRoute(halfMine, k);
   m.raider = true;
+  m.originCell = cell;                   // 联机：真正出击时把这格报给对面派兵
   m.queued = true;                       // 待命：等下一波
   m.headRi = k - 1;                      // 出兵格在 route 里的下标（route[k-1] === 出兵格）
   m.seq = ++RAIDER_SEQ;                  // 入队顺序，只用于同距离时的先后
@@ -1511,6 +1517,10 @@ function releaseQueue(){
     if (!m.queued) continue;
     m.queued = false; n++;
     burst(m.x, m.y, 6, m.owner === 'me' ? GOLD : SEAL);
+    /* 联机：排队期间对面看不到这支兵，真正随军出击才报过去 ——
+       对面收到后在镜像格生成同款兵，那才是这场遭遇战的「权威副本」。 */
+    if (NET.pvp && m.owner === 'me' && m.raider)
+      netSend({ k:'raid', cell:m.originCell, type:m.key, level:m.level, rid:++NET.seq });
   }
   return n;
 }
@@ -1631,6 +1641,9 @@ function killMarcher(m, killer){
 }
 function damageMarcher(m, d, killer){
   if (!m || m.hp <= 0) return;
+  /* 联机：我派出去的兵在本机只是「演出」，真正的伤害由对面算好推回来。
+     本地一旦也扣血，两边就各有一套血量，画面上必然对不上。 */
+  if (NET.pvp && m.owner === 'me') return;
   m.hp -= d; m.hurt = 1; m.flash = 0.25;
   if (m.hp <= 0) killMarcher(m, killer);
 }
@@ -1704,16 +1717,21 @@ function updateMarchers(dt){
     if (m.cd < -0.4) m.cd = -0.4;
 
     // 1) 对面也有兵在同一条路上 -> 迎面顶住，必须打死对方才能继续前进
-    const duel = nearestFoeMarcher(m, DUEL_R);
+    /* 联机：我派出去的兵只在本机「走给人看」——
+       打谁、掉多少血、扣几条命，全部由对面当作「我这半场的来兵」算完再推回来。
+       本地要是也打一套，两边各算一遍必然对不上（这边打死了、那边还满血）。
+       所以 ghost 兵不索敌、不出手、到终点也不扣命。 */
+    const ghost = NET.pvp && m.owner === 'me';
+    const duel = ghost ? null : nearestFoeMarcher(m, DUEL_R);
     if (duel){ strikeMarcher(m, duel); continue; }
 
     // 2) 路上有守军顶着脸 -> 原地厮杀（拦停靠的是「路上的兵」，路外的兵不挡路）
     const defMine = m.owner === 'ai';        // 我要打的是对面那块棋盘上的守军
-    const held = nearestDefender(defMine, m.x, m.y, BLOCK_R, true);
+    const held = ghost ? null : nearestDefender(defMine, m.x, m.y, BLOCK_R, true);
     if (held){ strikeDefender(m, held); continue; }
 
     // 3) 射程内路上的守军 -> 边打边挪，打得起来就走得慢
-    const far = nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD, true);
+    const far = ghost ? null : nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD, true);
     if (far) strikeDefender(m, far);
 
     // 4) 待命兵：按格子排队。排头站出兵格的下一格，第二人站再后一格 …… 一格一个人；
@@ -1733,7 +1751,7 @@ function updateMarchers(dt){
 
     if (marchForward(m, adv * dt)){
       G.marchers.splice(i,1);
-      hitAdu(m.owner === 'ai' ? 'my' : 'en');
+      if (!ghost) hitAdu(m.owner === 'ai' ? 'my' : 'en');
     }
   }
 }
@@ -1897,6 +1915,19 @@ function fxHit(mode, ax, ay, bx, by, r, color){
 /* 一侧守军的主循环（回血 / 脱战回血 / 大招 / 出手）—— 两边共用这一个函数 */
 function updateSideUnits(dt, mine){
   const S = sideInfo(mine);
+  /* 联机：对面那半场只有「影子守军」，它的血量与存亡由对面本人算好推过来。
+     这里只推进淡入/受击这些动画，绝不在这里掉血或阵亡 —— 本地算一套必然和对面分叉。 */
+  if (NET.pvp && !mine){
+    for (let i = 0; i < S.board.length; i++){
+      const u = S.board[i];
+      if (!u || !isAnchor(u, i)) continue;
+      u.born += dt;
+      u.flash = Math.max(0, u.flash - dt);
+      u.swing = Math.max(0, u.swing - dt);
+      u.hurt = Math.max(0, (u.hurt || 0) - dt*3);
+    }
+    return;
+  }
   ensureBuffs(mine);                       // 新落地的守军在这里兜底补上加成（两侧同一条）
   const reg = S.regen;
   for (let i = 0; i < S.board.length; i++){
@@ -2021,6 +2052,7 @@ const castSkill = castHeroSkill;          // 旧名字保留，别处还在用
    ============================================================ */
 /* 追加 n 个兵到某一侧的进攻队列：'down' 是敌军打我，'up' 是我打电脑 */
 function sendAttack(side, n){
+  if (NET.pvp) return;        // 联机没有自动派兵：出兵只能玩家自己点
   if (side === 'down'){
     G.spawnLeft += n;
     if (G.spawnGap <= 0) G.spawnGap = 0.30;
@@ -2526,7 +2558,8 @@ function step(dt){
   if (G.aiShield > 0) G.aiShield -= dt;
 
   // 下半场出兵：敌军从下半场的敌军出生点下来打我方主公
-  if (G.spawnLeft > 0){
+  // 联机：对面不会自动派兵，所有来兵都是对方玩家点出来的（raid 事件），本地绝不凭空生兵
+  if (!NET.pvp && G.spawnLeft > 0){
     G.spawnGap -= dt;
     if (G.spawnGap <= 0){
       G.spawnGap = spawnGapOf(G.wave);
@@ -2535,7 +2568,7 @@ function step(dt){
     }
   }
   // 上半场出兵：我军从上半场的敌军出生点上去打电脑的主公
-  if (G.aiSpawnLeft > 0){
+  if (!NET.pvp && G.aiSpawnLeft > 0){
     G.aiSpawnGap -= dt;
     if (G.aiSpawnGap <= 0){
       G.aiSpawnGap = spawnGapOf(G.wave);
@@ -4064,13 +4097,37 @@ function drawOver(){
     ctx.fillStyle = INK; ctx.font = 'bold 18px ' + FONT; ctx.textAlign = 'right';
     ctx.fillText(rows[i][1], px + pw - 66, y);
   }
-  const b = { x: W/2 - 130, y: py + ph - 84, w: 260, h: 56 };
-  G._againBtn = b;
-  const bg = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
-  bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
-  ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
-  ctx.fillStyle = '#fff6ee'; ctx.font = '23px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(NET.pvp ? '返 回 大 厅' : '再 战 一 局', W/2, b.y + b.h/2 + 1);
+  /* 底部按钮：单人一个「再战一局」；联机两个 —— 直接在同一间房里再开一局，或者退出房间 */
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (NET.pvp){
+    const bw = 240, gap = 16, bx = px + (pw - bw*2 - gap)/2, by = py + ph - 84;
+    const mk = (x, id, label, primary) => {
+      const r = { x, y: by, w: bw, h: 56 };
+      if (id === 'again') G._againBtn = r; else G._backBtn = r;
+      const g2 = ctx.createLinearGradient(0, by, 0, by + 56);
+      if (primary){ g2.addColorStop(0, '#c0483a'); g2.addColorStop(1, '#9e3226'); }
+      else { g2.addColorStop(0, '#fbf7ef'); g2.addColorStop(1, '#eee4d3'); }
+      ctx.fillStyle = 'rgba(70,60,45,0.14)';
+      rr(ctx, r.x+2, r.y+3, r.w, r.h, 14); ctx.fill();
+      ctx.fillStyle = g2; rr(ctx, r.x, r.y, r.w, r.h, 14); ctx.fill();
+      if (!primary){ ctx.strokeStyle = 'rgba(120,105,80,0.35)'; ctx.lineWidth = 1.5; rr(ctx, r.x, r.y, r.w, r.h, 14); ctx.stroke(); }
+      ctx.fillStyle = primary ? '#fff6ee' : INK;
+      ctx.font = '22px ' + FONT;
+      ctx.fillText(label, r.x + r.w/2, r.y + r.h/2 + 1);
+    };
+    G._backBtn = null;
+    mk(bx, 'again', NET.peer ? '再 来 一 局' : '对 手 已 离 开', !!NET.peer);
+    mk(bx + bw + gap, 'back', '返 回 大 厅', false);
+  } else {
+    G._backBtn = null;
+    const b = { x: W/2 - 130, y: py + ph - 84, w: 260, h: 56 };
+    G._againBtn = b;
+    const bg = ctx.createLinearGradient(0, b.y, 0, b.y+b.h);
+    bg.addColorStop(0, '#c0483a'); bg.addColorStop(1, '#9e3226');
+    ctx.fillStyle = bg; rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+    ctx.fillStyle = '#fff6ee'; ctx.font = '23px ' + FONT;
+    ctx.fillText('再 战 一 局', W/2, b.y + b.h/2 + 1);
+  }
 }
 
 /* ---------------- 暂停面板 ---------------- */
@@ -4672,10 +4729,46 @@ function netOnGame(d){
   if (!d) return;
   if (d.k === 'ready'){ NET.peerReady = true; toast('对手已准备'); return; }
   if (d.k === 'start'){ pvpStart(d.seed, false); return; }
+  if (d.k === 'again'){ gotoRoom(false); return; }   // 对面点了再来一局，一起回等候室
   if (!NET.pvp) return;
   if (d.k === 'side') netApplySide(d);
   else if (d.k === 'raid') netApplyRaid(d);
   else if (d.k === 'over') netApplyOver(d.winner);
+}
+/* 同一间房里再来一局：不清连接、不清房间，只把对局状态推倒重来，回到等候室。
+   bcast=true 表示是自己点的（要通知对面），false 表示收到了对面的通知。 */
+function gotoRoom(bcast){
+  if (NET.screen === 'room' && !NET.pvp) return;     // 已经回来了，别重复推倒
+  if (bcast) netSend({ k:'again' });
+  NET.pvp = false;
+  NET.started = false;
+  NET.ready = false;
+  NET.peerReady = false;
+  NET.seen = {};
+  NET.seq = 0;
+  NET.pushT = 0;
+  G.result = '';
+  G.phase = 'prep';
+  closeInspect();
+  newGame();
+  showScreen('room');
+  toast('准备再来一局', GOLD);
+}
+/* 结算后回大厅：连着的就回大厅，断了的回首页 */
+function gotoLobby(){
+  if (NET.ws && NET.ws.readyState === 1){
+    netSend({ t:'leave' });
+    NET.pvp = false; NET.started = false; NET.ready = false; NET.peerReady = false;
+    NET.seen = {}; NET.role = ''; NET.room = '';
+    G.result = ''; G.phase = 'prep';
+    showScreen('lobby');
+  } else {
+    netClose();
+    NET.pvp = false; NET.started = false; NET.peer = false; NET.peerReady = false;
+    NET.ready = false; NET.role = ''; NET.room = ''; NET.link = 'idle';
+    G.result = ''; G.phase = 'prep';
+    showScreen('home');
+  }
 }
 /* 终局裁定：命只由自己掉自己上报，所以房主手里的两个数（我的 myLife + 对面推来的 enLife）
    就是两边唯一的真相。由房主算一次、发一次，客机照办 —— 不会出现两边各判各的。 */
@@ -4904,13 +4997,17 @@ function onDown(ev){
   if (G.phase === 'over'){
     if (G._againBtn && inRect(p, G._againBtn)){
       sfx('click');
-      if (NET.pvp){                       // 联机不在这里重开：两边各重开就散了，回大厅重新配对
-        netSend({ t: NET.role === 'host' ? 'dissolve' : 'leave' });
-        NET.pvp = false; NET.started = false; NET.seen = {};
-        NET.room = ''; NET.role = ''; NET.peer = false; NET.peerReady = false; NET.ready = false;
-        showScreen('lobby');
+      if (NET.pvp){
+        if (!NET.peer){ toast('对手已经离开了'); return; }
+        gotoRoom(true);                   // 同一间房里再来一局，不必重建房间
         return;
       }
+      newGame(); startBattle();
+      return;
+    }
+    if (G._backBtn && inRect(p, G._backBtn)){
+      sfx('click');
+      if (NET.pvp){ gotoLobby(); return; }
       newGame(); startBattle();
     }
     return;
@@ -5204,6 +5301,7 @@ window.__api = {
   unitCells, unitPos, unitW, boardCount, eachUnit, clearCells, findHeroSpan, isAnchor,
   hitModeOf, inLine, inCircle, splashByDefender, splashByMarcher, splashByMarcherDuel, RANGE_PAD,
   NET, showScreen, startSolo, pvpStart, pvpHostStart, netApplySide, netApplyRaid, netPushSide,
+  gotoRoom, gotoLobby,
   netCheckOver, netApplyOver, hitAdu, endGame,
   mirrorCell, screenButton, makeNetInputs, layoutNetInputs, netOnMessage, netOnGame, netConnect, netClose,
   get UI_BTNS(){ return UI_BTNS; },
