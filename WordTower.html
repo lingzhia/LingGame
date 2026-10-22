@@ -4455,6 +4455,98 @@ function drawHome(){
 
   ctx.fillStyle = INK3; ctx.font = '17px ' + FONT;
   ctx.fillText('单人模式为本地存档 · 多人模式需要先启动转发服务器', W/2, H - 100);
+
+  /* 对局记录入口：最近几局都能从这里翻出来回放 */
+  const recs = recLoad().length;
+  uiBtn('records', 90, 1078, W - 180, 92, '对 局 记 录',
+        'plain', recs ? `最近 ${recs} 局 · 点开可回放` : '还没有记录 · 打完一局会自动存下');
+}
+
+/* ---------------- 对局记录页 ---------------- */
+const REC_UI = { page:0, per:8 };
+const pad2 = n => String(n).padStart(2, '0');
+function recTime(ts){
+  const d = new Date(ts || 0);
+  return `${pad2(d.getMonth()+1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+function recDur(sec){
+  const s = Math.max(0, Math.round(sec || 0));
+  return Math.floor(s/60) + ':' + pad2(s%60);
+}
+function recModeName(rec){
+  if (rec.mode === 'pvp') return '多人 · 1v1';
+  const lv = AI_LEVELS[clamp(rec.aiLevel | 0, 0, AI_LEVELS.length - 1)];
+  return '单人 · ' + (lv ? lv.name : '对战');
+}
+function drawRecords(){
+  drawBg(true);
+  UI_BTNS = [];
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = INK; ctx.font = 'bold 46px ' + FONT;
+  ctx.fillText('对 局 记 录', W/2, 118);
+
+  const all = recAll();
+  const total = all.length;
+  const pages = Math.max(1, Math.ceil(total / REC_UI.per));
+  REC_UI.page = clamp(REC_UI.page | 0, 0, pages - 1);
+
+  ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
+  if (total){
+    ctx.fillText(`共 ${total} 局 · 占用约 ${Math.max(1, Math.round(recBytes(all)/1024))} KB`, W/2, 172);
+    ctx.fillText(`超过 ${REC_MAX} 局或 ${REC_MAX_BYTES / 1048576} MB 时自动清理最旧的`, W/2, 200);
+  } else {
+    ctx.fillText('打完一局就会自动存在这里', W/2, 172);
+  }
+
+  const y0 = 240, rh = 102, gap = 11, x = 70, w = W - 140;
+  const items = all.slice(REC_UI.page * REC_UI.per, (REC_UI.page + 1) * REC_UI.per);
+  items.forEach((it, k) => {
+    const r = { x, y: y0 + k*(rh + gap), w, h: rh };
+    UI_BTNS.push({ id:'rec:' + it.i, r });
+    const rec = it.r;
+    ctx.fillStyle = 'rgba(70,60,45,0.12)';
+    rr(ctx, r.x+2, r.y+4, r.w, r.h, 16); ctx.fill();
+    const g = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
+    g.addColorStop(0, '#fbf7ef'); g.addColorStop(1, '#eee4d3');
+    ctx.fillStyle = g; rr(ctx, r.x, r.y, r.w, r.h, 16); ctx.fill();
+    ctx.strokeStyle = 'rgba(120,105,80,0.28)'; ctx.lineWidth = 2;
+    rr(ctx, r.x, r.y, r.w, r.h, 16); ctx.stroke();
+
+    ctx.textAlign = 'left';
+    ctx.fillStyle = INK; ctx.font = 'bold 24px ' + FONT;
+    ctx.fillText(recModeName(rec), r.x + 26, r.y + 36);
+    ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+    ctx.fillText(recTime(rec.ts), r.x + 26, r.y + 72);
+
+    ctx.textAlign = 'center';
+    const win = rec.result === 'win';
+    ctx.fillStyle = win ? '#b03a2e' : INK3;
+    ctx.font = 'bold 26px ' + FONT;
+    ctx.fillText(win ? '胜' : (rec.result === 'lose' ? '负' : '未终'), r.x + 400, r.y + 36);
+    ctx.fillStyle = INK3; ctx.font = '15px ' + FONT;
+    ctx.fillText(`${recDur(rec.time)} · ${rec.wave || 0} 波 · ${(rec.events || []).length} 步`,
+                 r.x + 400, r.y + 72);
+
+    ctx.fillStyle = 'rgba(120,105,80,0.55)'; ctx.font = '20px ' + FONT;
+    ctx.fillText('▶', r.x + w - 32, r.y + rh/2 + 1);
+  });
+
+  if (!total){
+    ctx.textAlign = 'center';
+    ctx.fillStyle = INK3; ctx.font = '20px ' + FONT;
+    ctx.fillText('空空的，先去打一局吧', W/2, 560);
+  }
+
+  /* 翻页 */
+  if (pages > 1){
+    const by = y0 + REC_UI.per*(rh + gap) + 6;
+    uiBtn('recPrev', 90, by, 170, 52, '上一页', REC_UI.page > 0 ? 'plain' : 'off');
+    uiBtn('recNext', W - 260, by, 170, 52, '下一页', REC_UI.page < pages - 1 ? 'plain' : 'off');
+    ctx.textAlign = 'center'; ctx.fillStyle = INK2; ctx.font = '18px ' + FONT;
+    ctx.fillText(`${REC_UI.page + 1} / ${pages}`, W/2, by + 27);
+  }
+
+  uiBtn('toHome', W/2 - 150, H - 150, 300, 60, '返 回', 'plain');
 }
 
 /* ---------------- 通用按钮 ---------------- */
@@ -5164,6 +5256,14 @@ function screenButton(id){
   if (id === 'solo'){ startSolo(); return; }
   if (id === 'online'){ showScreen('online'); return; }
   if (id === 'toHome'){ showScreen('home'); return; }
+  if (id === 'records'){ REC_UI.page = 0; showScreen('records'); return; }
+  if (id === 'recPrev'){ REC_UI.page--; return; }
+  if (id === 'recNext'){ REC_UI.page++; return; }
+  if (id.startsWith('rec:')){                 // 点一条记录 → 重新开局播这一局
+    const rec = recLoad()[+id.slice(4)];
+    if (rec) startReplay(rec, 'records');
+    return;
+  }
   if (id === 'enterLobby'){
     if (NET.link !== 'online') { toast('先连上服务器'); return; }
     NET.listT = 0; showScreen('lobby'); return;
@@ -5257,6 +5357,7 @@ function draw(){
     if (NET.screen === 'online') drawOnline();
     else if (NET.screen === 'lobby') drawLobby();
     else if (NET.screen === 'room') drawRoom();
+    else if (NET.screen === 'records') drawRecords();
     else drawHome();
     drawToast(72);                    // 菜单屏也要能看见提示，否则出错像没反应
     return;
@@ -5600,10 +5701,14 @@ function bindInput(){
    整局就能原样重演 —— 不需要存画面，也不需要存每一步的盘面。
    ============================================================ */
 const REC_KEY = 'wt_record_v1';
+/* 自动清理：条数或总体积先到线，就从最旧的开始丢（判定见 recSave）。
+   浏览器 localStorage 一般只有 5MB，留 2MB 给录像比较安全。 */
+const REC_MAX = 20;
+const REC_MAX_BYTES = 2 * 1024 * 1024;
 const HAS_LS = (() => { try { return !!window.localStorage; } catch(e){ return false; } })();
 const REC = { on:false, seed:0, aiLevel:0, events:[], start:0 };
 let LAST_REC = null;                       // 刚结束的那一局（结算页「回放本局」用）
-const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null };
+const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null, back:'over' };
 let IN_HOOK = null;                        // 回放时把录好的坐标直接喂进输入层
 
 function recBegin(){
@@ -5618,26 +5723,47 @@ function recEvent(type, p){
 function recLoad(){
   try { const s = localStorage.getItem(REC_KEY); return s ? (JSON.parse(s) || []) : []; } catch(e){ return []; }
 }
+/* 存一局，顺手做自动清理：
+   1) 条数超过 REC_MAX、或总量超过 REC_MAX_BYTES → 从最旧的开始丢
+   2) localStorage 真的写不进去（配额满）→ 再丢一局重试，直到能写或一局不剩
+   旧录像优先被牺牲，最近的几局总会保住。 */
 function recSave(rec){
-  try {
-    const arr = recLoad(); arr.push(rec);
-    while (arr.length > 10) arr.shift();                       // 只留最近 10 局
-    let s = JSON.stringify(arr);
-    while (s.length > 1200000 && arr.length > 1){ arr.shift(); s = JSON.stringify(arr); }
-    localStorage.setItem(REC_KEY, s);
-  } catch(e){ /* 存不下就算了，不挡游戏 */ }
+  let arr;
+  try { arr = recLoad(); } catch(e){ return; }
+  arr.push(rec);
+  let keep = Math.min(arr.length, REC_MAX);        // 先按条数砍
+  while (keep > 0){
+    const s = JSON.stringify(arr.slice(arr.length - keep));
+    if (s.length <= REC_MAX_BYTES){
+      try { localStorage.setItem(REC_KEY, s); return; } catch(e){ /* 配额不够，继续丢 */ }
+    }
+    keep--;
+  }
+  try { localStorage.removeItem(REC_KEY); } catch(e){}
+}
+/* 记录列表：新的在前 */
+function recAll(){
+  const arr = recLoad();
+  return arr.map((r, i) => ({ r, i })).reverse();
+}
+function recBytes(list){
+  let n = 0;
+  for (const it of list) { try { n += JSON.stringify(it.r).length; } catch(e){} }
+  return n;
 }
 function recFinish(){
   if (!REC.on) return;
   REC.on = false;
   if (!REC.events.length) return;          // 一步没动过，不留记录
-  LAST_REC = { ts:Date.now(), seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
+  LAST_REC = { ts:Date.now(), mode:'solo', seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
                time:+G.time.toFixed(1), wave:G.wave, events:REC.events };
   recSave(LAST_REC);
 }
-/* 回放：同种子重新开局，在录下来的那一步喂回同样的输入，2 倍速播完 */
-function startReplay(rec){
+/* 回放：同种子重新开局，在录下来的那一步喂回同样的输入，2 倍速播完
+   back：播完 / 退出后回到哪 —— 'over'（结算页，默认）| 'records'（对局记录页） */
+function startReplay(rec, back){
   if (!rec || !rec.events || !rec.events.length){ toast('这一局没有可回放的操作'); return; }
+  REPLAY.back = back || 'over';
   REPLAY.on = true; REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
   REPLAY.speed = 2; REPLAY.dispatching = false;
   const lastTick = rec.events[rec.events.length - 1][0];
@@ -5671,6 +5797,13 @@ function replayPump(){
 function stopReplay(finished){
   REPLAY.on = false; REPLAY.dispatching = false; IN_HOOK = null; REPLAY.exitBtn = null;
   G.paused = false;
+  const back = REPLAY.back || 'over';
+  REPLAY.back = 'over';
+  if (back === 'records'){                 // 从记录页点进来的，播完/退出都回记录页
+    if (!G.result) G.result = 'lose';
+    showScreen('records');
+    return;
+  }
   if (finished){
     if (!G.result) G.result = 'lose';      // 录到一半的局：按当前局面收尾
     G.phase = 'over';
@@ -5856,6 +5989,7 @@ function snapshotData(){
 window.__api = {
   newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
   snapshotData, recycleCell, simAdvance, startReplay, recBegin, recFinish,
+  recLoad, recSave, recAll, REC_UI, REC_MAX, REC_MAX_BYTES, drawRecords, drawHome,
   SIM, REPLAY, REC,
   get LAST_REC(){ return LAST_REC; },
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
