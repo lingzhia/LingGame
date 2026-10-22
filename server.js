@@ -28,9 +28,71 @@ const WEB_ROOT = __dirname;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
                '.css': 'text/css; charset=utf-8', '.png': 'image/png', '.jpg': 'image/jpeg' };
 
+/* ---------------- 对局存档落盘 ----------------
+ * 页面由本服务器托管时，每局打完会 POST 一份录像过来，直接写进 records/web/。
+ * 这样存档不再只活在浏览器 localStorage 里：刷新、换浏览器、关掉电脑都还在，
+ * 也能离线重放（headless.js --replay-web）。
+ */
+const REC_DIR = path.join(__dirname, 'records', 'web');
+const REC_MAX_BODY = 4 * 1024 * 1024;
+
+function pad2(n){ return String(n).padStart(2, '0'); }
+function stampName(ts){
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}_` +
+         `${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`;
+}
+function okJson(res, code, obj){
+  const s = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8',
+                        'Cache-Control': 'no-store', 'Content-Length': Buffer.byteLength(s) });
+  res.end(s);
+}
+function saveRecord(req, res){
+  const chunks = [];
+  let size = 0;
+  let aborted = false;
+  req.on('data', (c) => {
+    if (aborted) return;
+    size += c.length;
+    if (size > REC_MAX_BODY){                     // 别让人往磁盘里灌垃圾
+      aborted = true;
+      okJson(res, 413, { ok:false, error:'记录过大' });
+      req.destroy();
+      return;
+    }
+    chunks.push(c);
+  });
+  req.on('end', () => {
+    if (aborted) return;
+    let rec;
+    try { rec = JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+    catch(e){ return okJson(res, 400, { ok:false, error:'不是合法 JSON' }); }
+
+    /* 只收「看起来像一局录像」的东西；字段不全的不落盘，避免脏文件污染 records/ */
+    if (!rec || typeof rec !== 'object' || !Number.isFinite(rec.seed | 0) || !Array.isArray(rec.events))
+      return okJson(res, 400, { ok:false, error:'缺少 seed / events' });
+
+    const seed = rec.seed >>> 0;
+    const result = ['win', 'lose'].includes(rec.result) ? rec.result : 'unk';
+    const base = `${stampName(Number(rec.ts) || Date.now())}_seed${seed}_${result}`;
+    try {
+      fs.mkdirSync(REC_DIR, { recursive: true });
+      let file = path.join(REC_DIR, base + '.json');
+      for (let i = 2; fs.existsSync(file); i++) file = path.join(REC_DIR, `${base}_${i}.json`);
+      fs.writeFileSync(file, JSON.stringify(rec, null, 0), 'utf8');
+      okJson(res, 200, { ok:true, file:path.relative(__dirname, file), events:rec.events.length });
+    } catch(e){
+      okJson(res, 500, { ok:false, error:e.message });
+    }
+  });
+}
+
 /* ---------------- 静态托管 ---------------- */
 const httpServer = http.createServer((req, res) => {
   let rel = decodeURIComponent((req.url || '/').split('?')[0]);
+
+  if (req.method === 'POST' && rel === '/api/record'){ saveRecord(req, res); return; }
   if (rel === '/') rel = '/WordTower.html';
   const file = path.join(WEB_ROOT, path.normalize(rel).replace(/^(\.\.[/\\])+/, ''));
   if (!file.startsWith(WEB_ROOT) || !fs.existsSync(file) || fs.statSync(file).isDirectory()){

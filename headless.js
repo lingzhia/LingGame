@@ -314,11 +314,31 @@ function replay(file){
         finalSnapshot:api.snapshotData() });
 }
 
+/* 重放浏览器存的录像（records/web/*.json，格式 {seed, aiLevel, events:[[步,x0,y0,x1,y1]]}）：
+   和游戏里的「回放本局」走同一条路径 —— startReplay + 逐帧推进，所以状态完全一致。 */
+function replayWeb(file){
+  REPLAYING = true;
+  const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const list = Array.isArray(raw) ? raw : [raw];
+  const results = list.map((rec) => {
+    api.startReplay(rec, 'over');
+    if (!api.REPLAY.on) return { ok:false, error:'回放无法启动', seed:rec.seed };
+    let guard = 0;
+    while (api.REPLAY.on && guard++ < 60 * 60 * 20){ api.draw(); api.simAdvance(1 / 30); }
+    const G = api.G;
+    return { seed:rec.seed, expected:rec.result, result:G.result, match:!rec.result || rec.result === G.result,
+             time:+G.time.toFixed(2), wave:G.wave, actions:(rec.events || []).length,
+             finalSnapshot:api.snapshotData() };
+  });
+  out({ replay:file, count:results.length, results });
+}
+
 function main(){
   ({ api } = loadGame());
   const arg = process.argv[2];
   if (!arg) return interactive();
   if (arg === '--replay') return replay(process.argv[3]);
+  if (arg === '--replay-web') return replayWeb(process.argv[3]);
   return runScript(path.resolve(arg));
 }
 

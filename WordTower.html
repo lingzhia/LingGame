@@ -4509,8 +4509,17 @@ function drawRecords(){
       ctx.fillText('浏览器禁用了本地存储 · 记录只保留在当前页面', W/2, 226);
       ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
     }
+    if (SRV_SAVE === 'ok'){
+      ctx.fillStyle = 'rgba(78,120,60,0.90)'; ctx.font = '15px ' + FONT;
+      ctx.fillText('已自动存入 records/web/ · 换浏览器也找得回', W/2, LS_OK ? 226 : 252);
+      ctx.fillStyle = INK3; ctx.font = '16px ' + FONT;
+    }
   } else {
     ctx.fillText('打完一局就会自动存在这里', W/2, 172);
+  }
+  if (SRV_SAVE === 'off' && !total){
+    ctx.fillStyle = INK3; ctx.font = '14px ' + FONT;
+    ctx.fillText('用 http://localhost:8787 打开可自动存档到项目目录', W/2, 200);
   }
 
   const y0 = 240, rh = 102, gap = 11, x = 70, w = W - 140;
@@ -5824,6 +5833,22 @@ function recBytes(list){
   for (const it of list) { try { n += JSON.stringify(it.r).length; } catch(e){} }
   return n;
 }
+/* 自动落盘：页面是服务器发的（http/https），打完就把录像 POST 回去，
+   服务器写进项目 records/web/。浏览器存储清掉、换浏览器，档案都还在。
+   file:// 打开时没有服务器可发，退回只在浏览器里存（不影响游戏）。 */
+let SRV_SAVE = 'idle';                    // idle | ok | off | fail
+function recUpload(rec){
+  if (typeof fetch !== 'function' || typeof location === 'undefined' ||
+      !/^https?:$/.test(location.protocol || '')){ SRV_SAVE = 'off'; return; }
+  try {
+    fetch('/api/record', {
+      method:'POST', headers:{ 'Content-Type':'application/json' },
+      body: JSON.stringify(rec), keepalive:true,
+    }).then(r => r.ok ? r.json() : Promise.reject(new Error('HTTP ' + r.status)))
+      .then(() => { SRV_SAVE = 'ok'; })
+      .catch(() => { SRV_SAVE = 'fail'; });
+  } catch(e){ SRV_SAVE = 'fail'; }
+}
 function recFinish(){
   if (!REC.on) return;
   REC.on = false;
@@ -5831,6 +5856,7 @@ function recFinish(){
   LAST_REC = { v:2, ts:Date.now(), mode:'solo', seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
                time:+G.time.toFixed(1), wave:G.wave, events:REC.events };
   recSave(LAST_REC);
+  recUpload(LAST_REC);                     // 顺手往服务器存一份（能存才存）
 }
 /* 结算页要回放的那一局：优先「刚打完的」；
    万一进程内的 LAST_REC 丢了（刷新过页面 / 中途异常），就按种子从存档里找同一局。 */
@@ -6055,7 +6081,9 @@ function boardOut(board, mine){
   return out;
 }
 function snapshotData(){
-  return {
+  /* 过一遍 JSON：把 undefined 抹成「没有这个键」。
+     否则浏览器里是 null、Node 里是 undefined，同一局面互相比对会出现假差异。 */
+  return JSON.parse(JSON.stringify({
     seed:G.seed, phase:G.phase, paused:!!G.paused, pvp:!!NET.pvp,
     time:+G.time.toFixed(2), wave:G.wave,
     nextWaveIn:+Math.max(0, WAVE_GAP - G.waveT).toFixed(2),
@@ -6078,7 +6106,7 @@ function snapshotData(){
     })),
     shop:{ open:G.shopOpen || G.phase === 'shop', stock:G.shopStock.slice(), bought:G.shopBought },
     result:G.result,
-  };
+  }));
 }
 
 /* 无头 / 自动化测试钩子 */
@@ -6086,6 +6114,7 @@ window.__api = {
   newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
   snapshotData, recycleCell, simAdvance, startReplay, recBegin, recFinish,
   recLoad, recSave, recAll, REC_UI, REC_MAX, REC_MAX_BYTES, drawRecords, drawHome, replayRecForOver,
+  recUpload, srvSave: () => SRV_SAVE,
   SIM, REPLAY, REC,
   get LAST_REC(){ return LAST_REC; },
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
