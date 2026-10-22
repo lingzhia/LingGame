@@ -4205,16 +4205,16 @@ function drawOver(){
       ctx.fillText(label, r.x + r.w/2, r.y + r.h/2 + 1);
     };
     G._backBtn = null;
-    G._replayBtn = null;           // 联机不留单人的回放入口
+    G._replayBtn = G._exitBtn = null;   // 联机不留单人的回放入口
     mk(bx, 'again', NET.peer ? '再 来 一 局' : '对 手 已 离 开', !!NET.peer);
     mk(bx + bw + gap, 'back', '返 回 大 厅', false);
   } else {
     G._backBtn = null;
     /* 单人：左「回放本局」右「再战一局」。回放键常驻 ——
        没录到像也点得动，点了会说清原因，不会让人以为按钮消失了。 */
-    G._replayBtn = null;
-    const bw = 240, gap = 16, by = py + ph - 84;
-    const bx = px + (pw - bw*2 - gap)/2;
+    G._replayBtn = G._exitBtn = null;
+    const bw = 168, gap = 12, by = py + ph - 84;
+    const bx = px + (pw - bw*3 - gap*2)/2;
     const drawBtn = (r, label, primary) => {
       const g2 = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
       if (primary){ g2.addColorStop(0, '#c0483a'); g2.addColorStop(1, '#9e3226'); }
@@ -4229,9 +4229,11 @@ function drawOver(){
     };
     const rb = { x:bx, y:by, w:bw, h:56 };
     const ab = { x:bx + bw + gap, y:by, w:bw, h:56 };
-    G._replayBtn = rb; G._againBtn = ab;
-    drawBtn(rb, '回 放 本 局', false);
-    drawBtn(ab, '再 战 一 局', true);
+    const eb = { x:bx + (bw + gap)*2, y:by, w:bw, h:56 };
+    G._replayBtn = rb; G._againBtn = ab; G._exitBtn = eb;
+    drawBtn(rb, '回放本局', false);
+    drawBtn(ab, '再战一局', true);
+    drawBtn(eb, '返回首页', false);
   }
 }
 
@@ -5423,7 +5425,7 @@ function onDown(ev){
 
   // 回放中：不接受真实操作，只认「退出回放」
   if (REPLAY.on && !REPLAY.dispatching){
-    if (REPLAY.exitBtn && inRect(p, REPLAY.exitBtn)){ sfx('click'); stopReplay(false); }
+    if (!REPLAY.exitBtn || inRect(p, REPLAY.exitBtn)){ sfx('click'); stopReplay(false); }
     return;
   }
 
@@ -5473,7 +5475,13 @@ function onDown(ev){
     if (G._backBtn && inRect(p, G._backBtn)){
       sfx('click');
       if (NET.pvp){ gotoLobby(); return; }
-      newGame(); startBattle();
+      showScreen('home');
+      return;
+    }
+    if (G._exitBtn && inRect(p, G._exitBtn)){
+      sfx('click');
+      showScreen('home');                    // 带着结算态回首页，下次开打会重新 newGame
+      return;
     }
     return;
   }
@@ -5772,16 +5780,22 @@ function replayRecForOver(){
 function startReplay(rec, back){
   if (!rec || !rec.events || !rec.events.length){ toast('这一局没有可回放的操作'); return; }
   REPLAY.back = back || 'over';
-  REPLAY.on = true; REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
+  REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
   REPLAY.speed = 2; REPLAY.dispatching = false;
   const lastTick = rec.events[rec.events.length - 1][0];
   REPLAY.limit = lastTick + 60 * 120;      // 保险：最多再跑 2 分钟
-  newGame(rec.seed >>> 0);
-  setAILevel(rec.aiLevel | 0);
-  SIM.n = 0; SIM.acc = 0;
-  startBattle();                           // 录制也是从「备战」这一秒开始
+  try {
+    newGame(rec.seed >>> 0);
+    setAILevel(rec.aiLevel | 0);
+    SIM.n = 0; SIM.acc = 0;
+    startBattle();                         // 录制也是从「备战」这一秒开始
+  } catch(e){                              // 启动失败必须说出口，不能停在原地像没点一样
+    REPLAY.on = false; REPLAY.ev = []; REPLAY.i = 0;
+    console.error(e);
+    toast('回放启动失败 · ' + e.message, SEAL);
+    return;
+  }
   REPLAY.on = true;
-  REPLAY.rec = rec; REPLAY.ev = rec.events; REPLAY.i = 0;
   toast('回放本局 · ' + REPLAY.speed + ' 倍速', GOLD);
 }
 function replayDispatch(type, x, y){
