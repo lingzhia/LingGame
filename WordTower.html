@@ -4210,11 +4210,11 @@ function drawOver(){
     mk(bx + bw + gap, 'back', '返 回 大 厅', false);
   } else {
     G._backBtn = null;
-    /* 单人：左边「回放本局」（刚打完的那局有录像才亮），右边「再战一局」 */
-    const canReplay = !!(LAST_REC && LAST_REC.events && LAST_REC.events.length);
+    /* 单人：左「回放本局」右「再战一局」。回放键常驻 ——
+       没录到像也点得动，点了会说清原因，不会让人以为按钮消失了。 */
     G._replayBtn = null;
     const bw = 240, gap = 16, by = py + ph - 84;
-    const bx = canReplay ? px + (pw - bw*2 - gap)/2 : W/2 - 130;
+    const bx = px + (pw - bw*2 - gap)/2;
     const drawBtn = (r, label, primary) => {
       const g2 = ctx.createLinearGradient(0, r.y, 0, r.y + r.h);
       if (primary){ g2.addColorStop(0, '#c0483a'); g2.addColorStop(1, '#9e3226'); }
@@ -4227,17 +4227,11 @@ function drawOver(){
       ctx.font = '22px ' + FONT;
       ctx.fillText(label, r.x + r.w/2, r.y + r.h/2 + 1);
     };
-    if (canReplay){
-      const rb = { x:bx, y:by, w:bw, h:56 };
-      const ab = { x:bx + bw + gap, y:by, w:bw, h:56 };
-      G._replayBtn = rb; G._againBtn = ab;
-      drawBtn(rb, '回 放 本 局', false);
-      drawBtn(ab, '再 战 一 局', true);
-    } else {
-      const ab = { x:bx, y:by, w:bw, h:56 };
-      G._againBtn = ab;
-      drawBtn(ab, '再 战 一 局', true);
-    }
+    const rb = { x:bx, y:by, w:bw, h:56 };
+    const ab = { x:bx + bw + gap, y:by, w:bw, h:56 };
+    G._replayBtn = rb; G._againBtn = ab;
+    drawBtn(rb, '回 放 本 局', false);
+    drawBtn(ab, '再 战 一 局', true);
   }
 }
 
@@ -5461,7 +5455,9 @@ function onDown(ev){
   if (G.phase === 'over'){
     if (G._replayBtn && inRect(p, G._replayBtn)){
       sfx('click');
-      startReplay(LAST_REC);
+      const rec = replayRecForOver();
+      if (!rec){ toast('这一局没有录像 · 无法回放'); return; }
+      startReplay(rec, 'over');
       return;
     }
     if (G._againBtn && inRect(p, G._againBtn)){
@@ -5759,6 +5755,18 @@ function recFinish(){
                time:+G.time.toFixed(1), wave:G.wave, events:REC.events };
   recSave(LAST_REC);
 }
+/* 结算页要回放的那一局：优先「刚打完的」；
+   万一进程内的 LAST_REC 丢了（刷新过页面 / 中途异常），就按种子从存档里找同一局。 */
+function replayRecForOver(){
+  if (LAST_REC && LAST_REC.events && LAST_REC.events.length) return LAST_REC;
+  const seed = G.seed >>> 0;
+  const all = recLoad();
+  for (let i = all.length - 1; i >= 0; i--){
+    const r = all[i];
+    if (r && (r.seed >>> 0) === seed && r.events && r.events.length) return r;
+  }
+  return null;
+}
 /* 回放：同种子重新开局，在录下来的那一步喂回同样的输入，2 倍速播完
    back：播完 / 退出后回到哪 —— 'over'（结算页，默认）| 'records'（对局记录页） */
 function startReplay(rec, back){
@@ -5989,7 +5997,7 @@ function snapshotData(){
 window.__api = {
   newGame, step, draw, enlist, startBattle, dropOnCell, tryCombine, rollTile,
   snapshotData, recycleCell, simAdvance, startReplay, recBegin, recFinish,
-  recLoad, recSave, recAll, REC_UI, REC_MAX, REC_MAX_BYTES, drawRecords, drawHome,
+  recLoad, recSave, recAll, REC_UI, REC_MAX, REC_MAX_BYTES, drawRecords, drawHome, replayRecForOver,
   SIM, REPLAY, REC,
   get LAST_REC(){ return LAST_REC; },
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
