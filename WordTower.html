@@ -1297,8 +1297,9 @@ function waveTier(n){ return clamp(1 + Math.floor((n-1)/4), 1, MAX_TIER); }
    只压血与攻，不压出手速度（攻速是兵种属性，出征不打折）。 */
 const MARCH_SCALE = 1;
 /* 行军兵的血量补偿：兵在路上只顾赶路，攻击力基本没机会打出来，
-   作为补偿血量翻倍 —— 路上的兵是「能扛的肉」，不是「能打的刀」。 */
-const MARCH_HP_MUL = 2;
+   作为补偿给一点肉 —— 原来是 ×2（等于凭空多一整个品阶，波次直接打不动），
+   现在只 +10%：够表达「路上更耐打」，又不至于让守军打不动兵。 */
+const MARCH_HP_MUL = 1.1;
 /* 17 波之后单兵品阶封顶 5 阶，若只加数量两边会无限对峙。
    改为「精锐化」：17 波起每波血 +30%、移速 +20%（按超出 16 的波数叠乘），
    一波比一波快且硬，必然分出胜负。 */
@@ -3022,14 +3023,17 @@ function drawInspectMark(viewMine){
   if (targetMine !== viewMine) return;
 
   // ---- 攻击范围圈 ----
+  // 判定用的是「格心距 <= range」，所以半径 2 格的圈正好切在第二格中心上，
+  // 看着只有 1.5 格。画的时候补半格，让整格都落在圈里，视觉与「N 格」口径一致。
   if (ins.range > 0){
     const my = ins.side === 'my';
+    const rr = ins.range + CELL*0.5;
     ctx.save();
     ctx.fillStyle = my ? 'rgba(184,134,11,0.10)' : 'rgba(176,58,46,0.10)';
-    ctx.beginPath(); ctx.arc(ins.px, ins.py, ins.range, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(ins.px, ins.py, rr, 0, Math.PI*2); ctx.fill();
     ctx.strokeStyle = my ? 'rgba(184,134,11,0.60)' : 'rgba(176,58,46,0.55)';
     ctx.lineWidth = 2; ctx.setLineDash([9, 7]);
-    ctx.beginPath(); ctx.arc(ins.px, ins.py, ins.range, 0, Math.PI*2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(ins.px, ins.py, rr, 0, Math.PI*2); ctx.stroke();
     ctx.setLineDash([]);
     ctx.restore();
   }
