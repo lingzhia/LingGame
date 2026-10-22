@@ -5441,6 +5441,7 @@ function marcherView(e){
 function onDown(ev){
   ev.preventDefault();
   const p = toLogical(ev);
+  uiTap = false;              // 默认当成「要记的操作」，只有纯查看/菜单分支才改成 true
 
   // 回放中：不接受真实操作，只认「退出回放」
   if (REPLAY.on && !REPLAY.dispatching){
@@ -5454,8 +5455,9 @@ function onDown(ev){
     return;
   }
 
-  // 暂停中：只响应暂停面板
+  // 暂停中：只响应暂停面板（纯 UI，不入档）
   if (G.paused){
+    uiTap = true;
     for (const b of (G._lvBtns || [])) if (inRect(p, b.r)){
       const nm = setAILevel(b.i); sfx('click'); toast('难度 · ' + nm); return;
     }
@@ -5466,14 +5468,16 @@ function onDown(ev){
   G.dragger = null;
 
   // 暂停按钮
-  if (canPause() && inRect(p, BTN_PAUSE)){ setPaused(true); return; }
+  if (canPause() && inRect(p, BTN_PAUSE)){ uiTap = true; setPaused(true); return; }
 
   if (G.phase === 'intro'){
+    uiTap = true;                   // 备战前的难度/开始，属于开局前的 UI
     for (const b of (G._lvBtns || [])) if (inRect(p, b.r)){ sfx('click'); setAILevel(b.i); return; }
     if (G._startBtn && inRect(p, G._startBtn)){ sfx('click'); startBattle(); }
     return;
   }
   if (G.phase === 'over'){
+    uiTap = true;
     if (G._replayBtn && inRect(p, G._replayBtn)){
       sfx('click');
       const rec = replayRecForOver();
@@ -5512,6 +5516,7 @@ function onDown(ev){
 
   // 敌军放大视图（只读）：点单位看详情，点「收起」或空白处缩回去
   if (G.enemyBig){
+    uiTap = true;                   // 放大视图只读：点点看、收起，都不算操作
     if (inRect(p, BTN_FOLD)){ G.enemyBig = false; closeInspect(); sfx('click'); return; }
     const ei = boardCellAtV(p, V_BIG);
     if (ei >= 0 && G.enBoard[ei]){ inspectAt('ai', G.enBoard[ei], ei); return; }
@@ -5522,6 +5527,7 @@ function onDown(ev){
 
   // 敌军缩略图：点一下放大；点左半的战况面板不做事（暂停按钮已在上面拦下）
   if (p.y < TOP_H){
+    uiTap = true;                   // 点敌军缩略图 = 放大看，不入档
     if (p.x >= W/2){
       G.enemyBig = true; closeInspect(); sfx('click');
     }
@@ -5540,7 +5546,7 @@ function onDown(ev){
   const hadInspect = !!G.inspect;
 
   // 场上行进的兵：也能点开看（按它被画在哪个视口里算命中）
-  for (const e of G.marchers){ if (hitMarcher(e, p, marcherView(e))){ inspectAt('foe', e); return; } }
+  for (const e of G.marchers){ if (hitMarcher(e, p, marcherView(e))){ uiTap = true; inspectAt('foe', e); return; } }
 
   // 拿手牌
   const hi = handIndexAt(p);
@@ -5574,7 +5580,7 @@ function onDown(ev){
     };
     return;
   }
-  if (hadInspect) closeInspect();
+  if (hadInspect){ uiTap = true; closeInspect(); }
 }
 function onMove(ev){
   if (REPLAY.on && !REPLAY.dispatching) return;
@@ -5701,8 +5707,8 @@ function bindInput(){
   }, { passive:false });
   cv.addEventListener('pointermove', ev => { onMove(ev); }, { passive:false });
   cv.addEventListener('pointerup', ev => {
-    if (!REPLAY.on && pressAt) recAction(pressAt, toLogical(ev));
-    pressAt = null;
+    if (!REPLAY.on && pressAt && !uiTap) recAction(pressAt, toLogical(ev));
+    pressAt = null; uiTap = false;
     onUp(ev);
   }, { passive:false });
   cv.addEventListener('pointercancel', () => { pressAt = null; G.dragger = null; });
@@ -5749,6 +5755,10 @@ function recBegin(){
   REC.on = true; REC.seed = G.seed; REC.aiLevel = AI_LV; REC.events = []; REC.start = Date.now();
   SIM.n = 0; SIM.acc = 0;                  // 事件按「开战后的第几步」编号
 }
+/* 这一下点击是不是纯「看」的动作（放大敌军、看详情、暂停/菜单）：
+   只影响画面，不影响模拟，录进去除了让记录变胖、还可能让回放出岔子（比如回放里被自己按下暂停），
+   所以在 onDown 里打标，pointerup 时直接不入档。 */
+let uiTap = false;
 /* 一条操作 = 按下的点 → 松手的点（逻辑坐标，整数，与窗口大小无关） */
 function recAction(from, to){
   if (!REC.on) return;
