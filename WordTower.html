@@ -230,6 +230,13 @@ function aiLandOK(cell){
   if (FREE_E[cell]) return true;
   return !!(G && G.aiUnlocked && G.aiUnlocked[cell]);
 }
+/* ---------------- 某一侧的统一访问器 ----------------
+   同一套决策代码要能同时驱动「电脑」和「挂机时的我方」，
+   所以凡是要碰棋盘/手牌/熟地的地方都走这里，不再直接写 G.board / G.enBoard。 */
+function sideBoard(mine){ return mine ? G.board : G.enBoard; }
+function sideHand(mine){ return mine ? G.hand : G.ai.hand; }
+function sideUnlocked(mine){ return mine ? G.unlocked : G.aiUnlocked; }
+function landOKOf(cell, mine){ return mine ? !!G.unlocked[cell] : aiLandOK(cell); }
 const AI_TICK = 0.55;        // 电脑对手的决策间隔（秒），真值取 AI_LEVELS[lv].tick
 /* ---------------- 电脑难度 ----------------
    强度只调「决策质量」，不调兵种数值 —— 调数值会变成"AI 在作弊"，玩家一眼看得出来。
@@ -249,6 +256,16 @@ const AI_LEVELS = [
 let AI_LV = 1;                       // 默认「老将」；0 新兵 / 1 老将 / 2 枭雄
 const AIC = () => AI_LEVELS[clamp(AI_LV | 0, 0, AI_LEVELS.length - 1)];
 function setAILevel(n){ AI_LV = clamp(n | 0, 0, AI_LEVELS.length - 1); return AI_LEVELS[AI_LV].name; }
+/* 挂机：让电脑接管我方（单人对局专用）。
+   它和难度是两回事 —— 难度管的是对面那一半；挂机只是把我方也交给同一套决策。
+   开/关都会记进录像，所以挂机打的局依旧能完整回放。 */
+let AUTOPILOT = false;
+function setAutopilot(v){
+  AUTOPILOT = !!v;
+  if (G){ G.autopilot = AUTOPILOT; G.bot.t = 0; }
+  if (REC.on) REC.auto.push([SIM.n, AUTOPILOT ? 1 : 0]);
+  return AUTOPILOT;
+}
 /* 电脑盘上最多留几个「还没配成对」的单字（它们只是等伙伴的种子）。
    单字落地只是个占位道具（血 1、不会攻击），堆多了就是把熟地变成死地。 */
 const AI_MAX_CHARS = 3;
@@ -291,6 +308,7 @@ const BTN_ENLIST = { x: 24, y: 1296, w: 236, h: 58 };
 const SLOT = [{ x: 276, y: 1297 }, { x: 344, y: 1297 }];
 const SLOT_S = 56;
 const BTN_PAUSE = { x: TOP_L.w - 68, y: 16, w: 50, h: 50 };   // 战况面板右上角
+const BTN_AUTO  = { x: TOP_L.w - 136, y: 16, w: 62, h: 50 };  // 挂机开关（暂停键左边）
 const BTN_FOLD = { x: W - 96, y: 26, w: 74, h: 44 };           // 放大视图里的「收起」
 
 /* 视口：矩形（屏幕裁剪区）+ 缩放 k + 世界原点 wy0 落在屏幕的哪个 y。
@@ -814,6 +832,8 @@ function newGame(seed){
     enOut:[],               // 联机：对面派上路的兵（格索引 + 是否排队），只用来画
     // 电脑对手按玩家同一套规则运行：馒头只来自杀敌、一次刷新 5 格手牌、同种升阶（等级可差 1 阶，异字合成默认关闭）
     ai:{ mantou:8, cost:5, merit:0, meritNeed:21, hand:[], t:0, kills:0, passive:{}, actives:[] },
+    bot:{ t:0 },            // 挂机时「我方」的决策计时器（与 G.ai.t 同节奏）
+    autopilot:AUTOPILOT,    // 挂机：由电脑接管我方（单人对局专用）
     aiBondOn:{}, aiShield:0,
     aiUnlocked:{},          // 电脑自己开垦出来的格子
     prepT:0, aiT:0,
@@ -1386,7 +1406,10 @@ function startWave(early){
   // 注意：这里**不能**把征兵费重置回 5 —— 原来就是这一行让成本涨不上去的。
   // 现在征兵费只升不降：开局 5，每征一次 +1，越到后期越贵。
   if (G.passive.luoyang) handAdd({ kind:'shovel' });
-  if (G.ai.passive.luoyang) G.ai.hand.push({ kind:'shovel' });
+  // 手牌是固定 5 格：往第一个空格塞，不能 push（push 会长出第 6 格，和玩家的兵营对不上）
+  if (G.ai.passive.luoyang){
+    for (let i = 0; i < HAND_N; i++) if (!G.ai.hand[i]){ G.ai.hand[i] = { kind:'shovel' }; break; }
+  }
   const n = G.wave;
   const lv = waveTier(n);
   // 每批的兵力：3 + 2×波次 → 第 1 波 5 个、第 2 波 7 个、第 3 波 9 个……
@@ -2178,61 +2201,92 @@ function pickHeroCharAI(){
   return drawPoolChar(gRnd() < (G.ai.passive.zhaoxian ? 0.88 : 0.74));
 }
 /* 电脑征兵：直接调用与玩家同一个 enlistSide()，只有飘字/音效是各自的 */
-function aiEnlist(){
-  const r = enlistSide(false);
+function aiEnlist(mine){
+  mine = !!mine;
+  const r = enlistSide(mine);
   if (!r.ok) return;
-  G.fx.push({ type:'ring', x: W/2, y: MID1 - 10, r0:16, r1:130, t:0, dur:0.4, color:SEAL });
+  G.fx.push({ type:'ring', x: W/2, y: mine ? MID2 + 10 : MID1 - 10,
+              r0:16, r1:130, t:0, dur:0.4, color: mine ? GOLD : SEAL });
 }
 /* 落子：优先把手牌叠到场上同种的守军上（合成升阶，等级可差 1 阶），其次铺到空位 */
-/* 电脑也逛自己的商店：同一张道具表、同一套价格与上限（主动最多 2 件） */
-function aiShop(){
+/* 逛商店：同一张道具表、同一套价格与上限（主动最多 2 件）。mine=true 时是玩家的账 */
+function aiShop(mine){
+  mine = !!mine;
   const pool = SHOP_POOL.slice(), stock = [];
   for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((gRnd()*pool.length)|0,1)[0]);
   for (const id of stock){
     const it = ITEMS[id];
-    if (G.ai.mantou < it.cost) continue;
-    if (it.type === 'active' && G.ai.actives.length >= 2) continue;
-    G.ai.mantou -= it.cost;
-    if (it.type === 'active') G.ai.actives.push(id);
+    if (moneyOf(mine) < it.cost) continue;
+    if (it.type === 'active' && (mine ? G.actives : G.ai.actives).length >= 2) continue;
+    addMoney(mine, -it.cost);
+    if (it.type === 'active') (mine ? G.actives : G.ai.actives).push(id);
     else {
-      G.ai.passive[id] = true;
-      if (id === 'liangcao'){ G.enMax++; G.enLife++; }
+      (mine ? G.passive : G.ai.passive)[id] = true;
+      if (id === 'liangcao'){
+        if (mine){ G.myMax++; G.myLife++; } else { G.enMax++; G.enLife++; }
+      }
     }
   }
 }
-/* 电脑用主动道具：神兵符保命、大补丸回命、毛笔补单字 */
-function aiUseActives(){
-  for (let i = 0; i < G.ai.actives.length; i++){
-    const id = G.ai.actives[i];
+/* 用主动道具：神兵符保命、大补丸回命、毛笔补单字 */
+function aiUseActives(mine){
+  mine = !!mine;
+  const actives = mine ? G.actives : G.ai.actives;
+  const life = () => (mine ? G.myLife : G.enLife);
+  const lifeMax = () => (mine ? G.myMax : G.enMax);
+  const adu = mine ? ADU_M : ADU_E;
+  const tag = mine ? '我军' : '敌方';
+  for (let i = 0; i < actives.length; i++){
+    const id = actives[i];
     if (id === 'shenbing'){
-      if (G.enLife <= AIC().shieldAt && G.aiShield <= 0){
-        G.aiShield = 6; G.ai.actives.splice(i,1);
-        G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:20, r1:150, t:0, dur:0.5, color:GOLD });
-        toast('敌方使用 · 神兵符！');
+      if (life() <= AIC().shieldAt && (mine ? G.aduShield : G.aiShield) <= 0){
+        if (mine) G.aduShield = 6; else G.aiShield = 6;
+        actives.splice(i,1);
+        G.fx.push({ type:'ring', x:adu.x, y:adu.y, r0:20, r1:150, t:0, dur:0.5, color:GOLD });
+        toast(tag + '使用 · 神兵符！');
         return;
       }
     } else if (id === 'dabowu'){
-      if (G.enLife < G.enMax){
-        G.enLife++; G.ai.actives.splice(i,1);
-        G.fx.push({ type:'ring', x:ADU_E.x, y:ADU_E.y, r0:10, r1:90, t:0, dur:0.45, color:'#b08ed0' });
-        toast('敌方使用 · 大补丸！');
+      if (life() < lifeMax()){
+        if (mine) G.myLife++; else G.enLife++;
+        actives.splice(i,1);
+        G.fx.push({ type:'ring', x:adu.x, y:adu.y, r0:10, r1:90, t:0, dur:0.45, color:'#b08ed0' });
+        toast(tag + '使用 · 大补丸！');
         return;
       }
     } else if (id === 'maobi'){
-      for (let k = 0; k < G.ai.hand.length; k++){
-        const t = G.ai.hand[k];
+      const hand = sideHand(mine);
+      for (let k = 0; k < hand.length; k++){
+        const t = hand[k];
         if (!t || t.kind !== 'char') continue;
         const nc = partnerOf(t.char);
-        if (nc){ G.ai.hand[k] = { kind:'char', char:nc }; G.ai.actives.splice(i,1); return; }
+        if (nc){ hand[k] = { kind:'char', char:nc }; actives.splice(i,1); return; }
       }
     }
   }
 }
-/* 这张手牌现在能不能落下去（能合成就合成，能占空格就占格） */
-function aiTilePlaceable(t, allowEmpty){
+/* 挂机时的商店决策：买得起、不重复、留够征兵钱，然后立刻关店继续打 */
+function botShopStep(){
+  if (!G.shopBought && Array.isArray(G.shopStock)){
+    for (const id of G.shopStock){
+      const it = ITEMS[id];
+      if (!it || G.passive[id]) continue;
+      if (it.type === 'active' && G.actives.length >= 2) continue;
+      if (G.mantou - it.cost < 4) continue;          // 留点钱征兵
+      buyItem(id);
+      break;
+    }
+  }
+  closeShop();
+}
+/* 这张手牌现在能不能落下去（能合成就合成，能占空格就占格）。
+   mine=true 算的是玩家自己那一半（挂机 / 自对弈），两边共用同一套判断。 */
+function aiTilePlaceable(t, allowEmpty, mine){
+  mine = !!mine;
   if (!t || t.kind === 'shovel') return false;
-  for (let i = 0; i < G.enBoard.length; i++){
-    const u = G.enBoard[i];
+  const board = sideBoard(mine);
+  for (let i = 0; i < board.length; i++){
+    const u = board[i];
     if (!u) continue;
     if (!isAnchor(u, i)) continue;
     if (u.kind === 'char' && t.kind !== 'char') continue;
@@ -2241,80 +2295,87 @@ function aiTilePlaceable(t, allowEmpty){
     if (!aiCombOK(comb)) continue;
     if (comb.kind === 'hero'){
       const allow = [i].concat(u.cells || []);
-      if (findHeroSpan(i, G.enBoard, false, allow)) return true;
+      if (findHeroSpan(i, board, mine, allow)) return true;
     } else return true;
   }
   if (!allowEmpty) return false;
   // 单字：能挨着另一半放、或者盘上孤字没到上限且熟地还宽裕，才值得去占一个空坑。
   // 否则就当它落不下（留在手里，下次征兵会被回收），免得把熟地铺满死字。
-  if (t.kind === 'char' && !aiCharWorth(t.char)) return false;
-  for (let i = 0; i < G.enBoard.length; i++){
-    if (G.enBoard[i] || isPathCell(i, false) || isAduCell(i, false) || !aiLandOK(i)) continue;
-    if (t.kind === 'hero' && !findHeroSpan(i, G.enBoard, false, [])) continue;
+  if (t.kind === 'char' && !aiCharWorth(t.char, mine)) return false;
+  for (let i = 0; i < board.length; i++){
+    if (board[i] || isPathCell(i, mine) || isAduCell(i, mine) || !landOKOf(i, mine)) continue;
+    if (t.kind === 'hero' && !findHeroSpan(i, board, mine, [])) continue;
     return true;
   }
   // 熟地占满时，普通兵还能顶掉盘上的「孤字」
-  if (t.kind === 'unit' && aiJunkCharCell() >= 0) return true;
+  if (t.kind === 'unit' && aiJunkCharCell(mine) >= 0) return true;
   return false;
 }
-/* 电脑盘上还空着的熟地格数 */
-function aiEmptyLand(){
+/* 盘上还空着的熟地格数 */
+function aiEmptyLand(mine){
+  const board = sideBoard(!!mine);
   let n = 0;
-  for (let i = 0; i < G.enBoard.length; i++)
-    if (!G.enBoard[i] && !isPathCell(i, false) && !isAduCell(i, false) && aiLandOK(i)) n++;
+  for (let i = 0; i < board.length; i++)
+    if (!board[i] && !isPathCell(i, !!mine) && !isAduCell(i, !!mine) && landOKOf(i, !!mine)) n++;
   return n;
 }
-/* 电脑盘上还有几个单字 */
-function aiCharCount(){
+/* 盘上还有几个单字 */
+function aiCharCount(mine){
   let n = 0;
-  for (const u of G.enBoard) if (u && u.kind === 'char') n++;
+  for (const u of sideBoard(!!mine)) if (u && u.kind === 'char') n++;
   return n;
 }
-/* 电脑已经派出去几个出击兵（防止它把整手牌都倒到路上） */
-function aiRaiderCount(){
+/* 这一侧已经派出去几个出击兵（防止把整手牌都倒到路上） */
+function aiRaiderCount(mine){
+  const who = mine ? 'me' : 'ai';
   let n = 0;
-  for (const m of G.marchers) if (m.owner === 'ai' && m.raider) n++;
+  for (const m of G.marchers) if (m.owner === who && m.raider) n++;
   return n;
 }
 /* 这块单字牌值不值得落到盘上：
    能紧挨着另一半放（落下去立刻成将）→ 值得；
    否则只有在「盘上的孤字还没到上限」且「熟地还宽裕」时才铺，
    免得一路铺满死字、把熟地占干。 */
-function aiCharWorth(ch){
-  if (aiCharSpot(ch) >= 0) return true;
-  return aiCharCount() < AIC().maxChars && aiEmptyLand() >= AIC().holdFree;
+function aiCharWorth(ch, mine){
+  mine = !!mine;
+  if (aiCharSpot(ch, mine) >= 0) return true;
+  return aiCharCount(mine) < AIC().maxChars && aiEmptyLand(mine) >= AIC().holdFree;
 }
-/* 落子：优先把手牌叠到场上同种的守军上（合成升阶，等级可差 1 阶），其次铺到空位 */
-function aiPlace(){
-  // 布阵上限 = 自己实际能用的地格数（有空地就继续铺）。
-  // 原来写死成 18+波次×1.6，而整局地格只有 10-13 格，这个数永远达不到 ——
-  // AI 一直以为「盘还没铺满」，于是几乎不往路上派兵，进攻能力等于没有。
-  let cnt = boardCount(G.enBoard);
+/* 落子：优先把手牌叠到场上同种的守军上（合成升阶，等级可差 1 阶），其次铺到空位。
+   mine=true：玩家那一半（挂机 / 自对弈），规则、打分、上限一字不差。 */
+function aiPlace(mine){
+  mine = !!mine;
+  const board = sideBoard(mine), hand = sideHand(mine);
+  const who = mine ? 'me' : 'ai';
+  const baseY = mine ? Y_MINE : Y_ENEMY;
+  const tag = mine ? '我军' : '敌方';
+  const pathCells = mine ? PATH_CELLS_M : PATH_CELLS_E;
+  let cnt = boardCount(board);
   let placed = 0;
 
-  for (let hi = G.ai.hand.length - 1; hi >= 0; hi--){
-    const t = G.ai.hand[hi];
-    if (!t){ G.ai.hand.splice(hi, 1); continue; }
-    // 铲子：电脑也开垦荒地（和玩家 dropOnCell 里的铲子逻辑对称）
+  for (let hi = hand.length - 1; hi >= 0; hi--){
+    const t = hand[hi];
+    if (!t) continue;
+    // 铲子：开垦荒地（两边同一套：抽到就挖当前最值的一格）
     if (t.kind === 'shovel'){
       let best = -1, bs = -1e9;
-      for (let i = 0; i < G.enBoard.length; i++){
-        if (isRoad(i, false) || aiLandOK(i) || G.enBoard[i]) continue;
-        const sc = cellScore(i, false);
+      for (let i = 0; i < board.length; i++){
+        if (isRoad(i, mine) || landOKOf(i, mine) || board[i]) continue;
+        const sc = cellScore(i, mine);
         if (sc > bs){ bs = sc; best = i; }
       }
       if (best >= 0){
-        G.aiUnlocked[best] = true; G.ai.hand.splice(hi, 1);
-        // 与玩家开垦同款反馈（金光 + 提示）：不然电脑默默挖地，玩家以为它不会用铲子
-        burst(cellCX(colOf(best)), cellCY(colOf(best), rowOf(best), Y_ENEMY), 12, GRASS);
-        toast('敌方开垦荒地 · 已开 ' + (START_OPEN + Object.keys(G.aiUnlocked).length) + ' 格');
+        sideUnlocked(mine)[best] = true; hand[hi] = null;
+        // 和玩家开垦同款反馈：不然默默挖地，对面以为这边不会用铲子
+        burst(cellCX(colOf(best)), cellCY(colOf(best), rowOf(best), baseY), 12, GRASS);
+        toast(tag + '开垦荒地 · 已开 ' + (START_OPEN + Object.keys(sideUnlocked(mine)).length) + ' 格');
       }
       continue;
     }
     // 1) 叠到同种的守军身上 -> 升阶（等级可差 1 阶）
     let merged = false;
-    for (let i = 0; i < G.enBoard.length && !merged; i++){
-      const u = G.enBoard[i];
+    for (let i = 0; i < board.length && !merged; i++){
+      const u = board[i];
       if (!u || !isAnchor(u, i)) continue;
       if (u.kind === 'char' && t.kind !== 'char') continue;
       const comb = tryCombine(t, u);
@@ -2323,74 +2384,74 @@ function aiPlace(){
       if (comb.kind === 'hero'){
         // 名将横占两格
         const allow = [i].concat(u.cells || []);
-        const span = findHeroSpan(i, G.enBoard, false, allow);
+        const span = findHeroSpan(i, board, mine, allow);
         if (!span) continue;
-        if (u.cells) for (const k of u.cells) if (span.indexOf(k) < 0) G.enBoard[k] = null;
+        if (u.cells) for (const k of u.cells) if (span.indexOf(k) < 0) board[k] = null;
         const nu = newUnit(comb.type, comb.level, span[0], span);
         nu.born = 0;
-        for (const k of span) G.enBoard[k] = nu;
+        for (const k of span) board[k] = nu;
         const cx = (cellCX(colOf(span[0])) + cellCX(colOf(span[1]))) / 2;
-        burst(cx, cellCY(colOf(span[0]), rowOf(span[0]), Y_ENEMY), 24, GOLD);
-        toast('敌方召出 · ' + comb.type + '！');
+        burst(cx, cellCY(colOf(span[0]), rowOf(span[0]), baseY), 24, GOLD);
+        toast(tag + '召出 · ' + comb.type + '！');
       } else {
         const nu = toUnitObject(comb, i);
         nu.born = 0;
-        G.enBoard[i] = nu;
-        burst(cellCX(colOf(i)), cellCY(colOf(i), rowOf(i), Y_ENEMY), 12, SEAL);
+        board[i] = nu;
+        burst(cellCX(colOf(i)), cellCY(colOf(i), rowOf(i), baseY), 12, SEAL);
       }
-      G.ai.hand.splice(hi, 1);
+      hand[hi] = null;
       merged = true; placed++;
     }
     if (merged) continue;
     // 2) 铺到空位（还有空地就铺）
     let done = false;
-    if (aiEmptyLand() > 0){
+    if (aiEmptyLand(mine) > 0){
       const empt = [];
-      for (let i = 0; i < G.enBoard.length; i++)
-        if (!G.enBoard[i] && !isPathCell(i, false) && !isAduCell(i, false) && aiLandOK(i)) empt.push(i);
+      for (let i = 0; i < board.length; i++)
+        if (!board[i] && !isPathCell(i, mine) && !isAduCell(i, mine) && landOKOf(i, mine)) empt.push(i);
       // 单字优先贴着它的「另一半」落 —— 一放下 autoFormHeroes 就会把两字拼成名将。
       // 没伙伴可配、熟地又吃紧的时候就别拿单字去占坑（留在手里，下次征兵一起回收）。
       // 原来不做区分，单字一路铺满前排却永远拼不起来，中后期电脑半张盘都是死字。
       let idx = -1;
-      if (t.kind === 'char') idx = aiCharSpot(t.char);
-      if (idx < 0 && t.kind === 'char' && !aiCharWorth(t.char)) continue;
-      if (idx < 0 && empt.length) idx = aiPickCell(empt);
+      if (t.kind === 'char') idx = aiCharSpot(t.char, mine);
+      if (idx < 0 && t.kind === 'char' && !aiCharWorth(t.char, mine)) continue;
+      if (idx < 0 && empt.length) idx = aiPickCell(empt, mine);
       if (idx >= 0){
         if (t.kind === 'hero'){
-          const span = findHeroSpan(idx, G.enBoard, false, []);
+          const span = findHeroSpan(idx, board, mine, []);
           if (span){
             const nu = newUnit(t.type, t.level, span[0], span);
             nu.born = 0;
-            for (const k of span) G.enBoard[k] = nu;
-            G.ai.hand.splice(hi, 1); cnt++; placed++; done = true;
+            for (const k of span) board[k] = nu;
+            hand[hi] = null; cnt++; placed++; done = true;
           }
         } else {
           const nu = toUnitObject(t, idx);
-          if (nu){ nu.born = 0; G.enBoard[idx] = nu; G.ai.hand.splice(hi, 1); cnt++; placed++; done = true; }
+          if (nu){ nu.born = 0; board[idx] = nu; hand[hi] = null; cnt++; placed++; done = true; }
         }
       }
     }
-    // 2b) 盘上放不下了：多余的兵放上路 -> 变成出击兵，从它的半场朝我这边打过来。
-    //     和玩家同一套规则（spawnRaider），只是起点用电脑自己半场的路头；上限按难度给。
-    if (!done && t.kind === 'unit' && freeRoadSlots(false) > 0 && aiRaiderCount() < AIC().raiderCap){
+    // 2b) 盘上放不下了：多余的兵放上路 -> 变成出击兵，朝对面打过去。
+    //     和玩家同一套规则（spawnRaider），只是起点用自己半场的路头；上限按难度给。
+    if (!done && t.kind === 'unit' && freeRoadSlots(who) > 0 && aiRaiderCount(mine) < AIC().raiderCap){
       // 放不进棋盘的兵不干等：派上路，从路头往下走两格再过缝，别显得像瞬移
-      const cell = PATH_CELLS_E[Math.min(2, PATH_CELLS_E.length - 1)];
-      if (cell !== undefined && spawnRaider('ai', cell, t.type, t.level)){
-        G.ai.hand.splice(hi, 1); placed++; done = true;
+      const cell = pathCells[Math.min(2, pathCells.length - 1)];
+      if (cell !== undefined && spawnRaider(who, cell, t.type, t.level)){
+        hand[hi] = null; placed++; done = true;
       }
     }
     // 2c) 熟地占满了：普通兵可以顶掉盘上一个「孤字」（另一半不在场，纯占坑的死字）。
-    //     没有这条，单字一旦铺开就永远清不掉，电脑的战斗力会一路烂下去。
+    //     没有这条，单字一旦铺开就永远清不掉，战斗力会一路烂下去。
     if (!done && t.kind === 'unit'){
-      const j = aiJunkCharCell();
+      const j = aiJunkCharCell(mine);
       if (j >= 0){
-        clearCells(G.enBoard, j);
+        clearCells(board, j);
         const nu = toUnitObject(t, j);
-        if (nu){ nu.born = 0; G.enBoard[j] = nu; G.ai.hand.splice(hi, 1); placed++; done = true; }
+        if (nu){ nu.born = 0; board[j] = nu; hand[hi] = null; placed++; done = true; }
       }
     }
   }
-  if (placed) autoFormHeroes(G.enBoard, false);   // 电脑也享受「相邻两字自动成将」
+  if (placed) autoFormHeroes(board, mine);   // 「相邻两字自动成将」两边都享受
   return placed;
 }
 /* 布阵打分：贴着路边（pathAway=1）的格子最能拦停敌军，隔一格的次之，越荒越差。
@@ -2405,17 +2466,20 @@ function cellScore(i, mine){
   // 贴着主公的格子是最后一道防线
   const aduC = mine ? ADU_M_C : ADU_E_C;
   const da = Math.max(Math.abs(c - aduC[0]), Math.abs(r - aduC[1]));
-  if (da === 1) s += 3;
-  // 往前压：玩家的出兵点在 r=0 一侧，电脑的在 r=ROWS-1 一侧
+  if (da === 1) s += 1.5;
+  /* 往前压：玩家的出兵点在 r=0 一侧，电脑的在 r=ROWS-1 一侧。
+     权重从 0.22 提到 0.5、主公贴身的加分从 3 降到 1.5 —— 自对弈实测：
+     缩在主公身边挨打，敌人是「满血走到家门口」才挨两下；前压接敌能多打一路，
+     每局平均波次从 7.1 提到 9.5。 */
   const front = mine ? r : (ROWS - 1 - r);
-  s -= front * 0.22;
+  s -= front * 0.5;
   return s;
 }
 /* 选格子：优先能拦停敌军的路边格，其次贴着主公的格子，其余往前压 */
-function aiPickCell(empt){
+function aiPickCell(empt, mine){
   let best = empt[0], bs = -1e9;
   for (const i of empt){
-    const s = cellScore(i, false);
+    const s = cellScore(i, !!mine);
     if (s > bs){ bs = s; best = i; }
   }
   return best;
@@ -2433,67 +2497,120 @@ function partnersOf(ch){
 }
 /* 这块单字牌放在哪最值：紧挨着场上另一半字的空位（放下去 autoFormHeroes 立刻拼成名将）。
    找不到返回 -1。 */
-function aiCharSpot(ch){
+function aiCharSpot(ch, mine){
+  mine = !!mine;
+  const board = sideBoard(mine);
   const ps = partnersOf(ch);
   if (!ps.length) return -1;
-  for (let i = 0; i < G.enBoard.length; i++){
-    const u = G.enBoard[i];
+  for (let i = 0; i < board.length; i++){
+    const u = board[i];
     if (!u || u.kind !== 'char' || ps.indexOf(u.char) < 0) continue;
     const c = colOf(i), r = rowOf(i);
     for (const nc of [c - 1, c + 1]){
       if (nc < 0 || nc >= COLS) continue;
       const j = nc + r * COLS;
-      if (G.enBoard[j] || !aiLandOK(j) || isPathCell(j, false) || isAduCell(j, false)) continue;
+      if (board[j] || !landOKOf(j, mine) || isPathCell(j, mine) || isAduCell(j, mine)) continue;
       return j;
     }
   }
   return -1;
 }
 /* 盘上的「孤字」：单字，且场上没有能跟它拼上的另一半 —— 纯占坑，普通兵可以把它顶掉 */
-function aiJunkCharCell(){
-  for (let i = 0; i < G.enBoard.length; i++){
-    const u = G.enBoard[i];
+function aiJunkCharCell(mine){
+  mine = !!mine;
+  const board = sideBoard(mine);
+  for (let i = 0; i < board.length; i++){
+    const u = board[i];
     if (!u || u.kind !== 'char') continue;
     const ps = partnersOf(u.char);
     let has = false;
-    for (let k = 0; k < G.enBoard.length && !has; k++){
+    for (let k = 0; k < board.length && !has; k++){
       if (k === i) continue;
-      const v = G.enBoard[k];
+      const v = board[k];
       if (v && v.kind === 'char' && ps.indexOf(v.char) >= 0) has = true;
     }
     if (!has) return i;
   }
   return -1;
 }
-function aiTick(dt){
-  if (NET.pvp) return;          // 联机：对面是真人，电脑不插手
-  G.ai.t += dt;
-  if (G.ai.t < AIC().tick) return;
-  G.ai.t = 0;
-  aiUseActives();
-  aiPlace();
-  // 手牌全落不下去了才刷新征兵，免得把攒着的单字碎片回收掉
-  let canPlace = false;
-  for (const t of G.ai.hand){ if (aiTilePlaceable(t, true)){ canPlace = true; break; } }
-  if (!canPlace){ aiEnlist(); aiPlace(); }
-  refreshAiBonds();
+/* 手里没牌、馒头又不够征兵时，人会遣散一个用不上的守军换馒头 —— bot 也照做。
+   没有这条，一旦「空手 + 缺钱」就永远翻不了身：不征兵就没收入，没收入就不能征兵。 */
+function aiRaiseCash(mine, need){
+  const board = sideBoard(mine), baseY = mine ? Y_MINE : Y_ENEMY;
+  const tag = mine ? '我军' : '敌方';
+  for (let guard = 0; guard < 6 && moneyOf(mine) < need; guard++){
+    let pickIdx = -1, bestRank = 1e9;
+    for (let i = 0; i < board.length; i++){
+      const u = board[i];
+      if (!u || !isAnchor(u, i)) continue;
+      if (u.kind === 'hero') continue;                     // 名将不拆
+      if (u.kind === 'unit' && (u.level || 1) >= 3) continue;  // 高阶兵不拆
+      // 单字（1 血的占坑货）先拆，其次低阶兵
+      const rank = (u.kind === 'char' ? 0 : 100) + recycleValue(u);
+      if (rank < bestRank){ bestRank = rank; pickIdx = i; }
+    }
+    if (pickIdx < 0) return false;                          // 已经没东西可拆
+    if (boardCount(board) <= 2) return false;               // 只剩两个守军：守家要紧，不拆
+    const u = board[pickIdx];
+    const gain = recycleValue(u);
+    const p = unitPos(u, baseY);
+    clearCells(board, pickIdx);
+    addMoney(mine, gain);
+    if (mine) refreshBonds(); else refreshAiBonds();
+    burst(p.x, p.y, 10, INK3);
+    toast(tag + '遣散守军 · 折 ' + gain + ' 馒头');
+    if (gain <= 0) return false;
+  }
+  return moneyOf(mine) >= need;
+}
+/* 一侧的决策：电脑（mine=false）和挂机时的我方（mine=true）跑的是同一段代码。
+   决策节奏、布阵打分、征兵规则、出击上限全都一样 —— 挂机不给玩家开小灶。 */
+function aiThink(dt, mine){
+  mine = !!mine;
+  if (NET.pvp) return;          // 联机：对面是真人，本机不替任何一方出手
+  const st = mine ? G.bot : G.ai;
+  st.t += dt;
+  if (st.t < AIC().tick) return;
+  st.t = 0;
+  aiUseActives(mine);
+  aiPlace(mine);
+  // 手牌全落不下去了才刷新征兵，免得把攒着的单字碎片回收掉；
+  // 手牌见底（≤1 张）也补一次 —— 空手的队伍既打不出兵、也换不到铲子。
+  const hand = sideHand(mine);
+  let canPlace = false, handN = 0;
+  for (const t of hand){ if (!t) continue; handN++; if (aiTilePlaceable(t, true, mine)) canPlace = true; }
+  if (!canPlace){
+    const need = mine ? G.enlistCost : G.ai.cost;
+    // 缺钱时只肯「拆一个就能凑够」的账；差得多就老实等杀敌收入，不是把防线拆光
+    if (moneyOf(mine) < need){
+      const gap = need - moneyOf(mine);
+      if (gap <= 2) aiRaiseCash(mine, need);
+    }
+    aiEnlist(mine);
+    aiPlace(mine);
+  }
+  refreshBondsOf(mine);
   // 开波前 1.5 秒：把落不下的兵一股脑推上路。
   // 人类一直是这么打的（手牌随时能丢到路上当免费进攻兵），AI 以前从不这么做，
   // 所以它的进攻能力几乎为零 —— 这是它最大的短板。
   if (AIC().rush && G.phase === 'battle'){
     const left = WAVE_GAP - G.waveT;
-    if (left > 0 && left <= 1.6) aiFlushHand();
+    if (left > 0 && left <= 1.6) aiFlushHand(mine);
   }
 }
-/* 把手牌里「上不了盘」的兵推上路：每个是一份免费进攻战力（玩家点一下就做到，AI 以前做不到） */
-function aiFlushHand(){
-  for (let i = G.ai.hand.length - 1; i >= 0; i--){
-    const t = G.ai.hand[i];
+function aiTick(dt){ aiThink(dt, false); }
+/* 把手牌里「上不了盘」的兵推上路：每个是一份免费进攻战力（玩家点一下就做到） */
+function aiFlushHand(mine){
+  mine = !!mine;
+  const hand = sideHand(mine), who = mine ? 'me' : 'ai';
+  const pathCells = mine ? PATH_CELLS_M : PATH_CELLS_E;
+  for (let i = hand.length - 1; i >= 0; i--){
+    const t = hand[i];
     if (!t || t.kind !== 'unit') continue;
-    if (freeRoadSlots(false) <= 0) return;
-    const cell = PATH_CELLS_E[Math.min(2, PATH_CELLS_E.length - 1)];
+    if (freeRoadSlots(who) <= 0) return;
+    const cell = pathCells[Math.min(2, pathCells.length - 1)];
     if (cell === undefined) return;
-    if (spawnRaider('ai', cell, t.type, t.level)) G.ai.hand.splice(i, 1);
+    if (spawnRaider(who, cell, t.type, t.level)) hand[i] = null;
   }
 }
 /* ============================================================
@@ -2617,10 +2734,13 @@ function endGame(win){
 
 function step(dt){
   if (G.paused) return;                                            // 暂停：时间不推进
+  // 挂机：商店会冻住时间，得由挂机的我方自己买完走人，否则整局卡在店里
+  if (G.autopilot && G.phase === 'shop'){ updateFx(dt); botShopStep(); return; }
   if (G.phase === 'intro' || G.phase === 'over' || G.phase === 'shop'){ updateFx(dt); return; }
   if (G.phase === 'prep'){
     G.prepT -= dt;
     aiTick(dt);            // 备战时电脑也在同步经营，两边起点一样
+    if (G.autopilot) aiThink(dt, true);
     if (G.prepT <= 0){ G.phase = 'battle'; startWave(); }
     return;
   }
@@ -2674,6 +2794,7 @@ function step(dt){
   }
 
   aiTick(dt);                 // 电脑征兵/布阵（与玩家的节奏一致）
+  if (G.autopilot) aiThink(dt, true);   // 挂机：我方走同一段决策
 
   updateFx(dt);
 }
@@ -3540,6 +3661,21 @@ function drawInfoPanel(){
   ctx.fillStyle = 'rgba(90,80,65,0.42)'; ctx.font = '11px ' + FONT;
   ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
   ctx.fillText('点右侧敌军缩略图 → 放大查看', x0, by + bh - 22);
+
+  // ---- 挂机开关 ----
+  if (canPause()){
+    const b = BTN_AUTO, on = !!G.autopilot;
+    ctx.fillStyle = on ? 'rgba(184,134,11,0.16)' : 'rgba(70,60,45,0.14)';
+    rr(ctx, b.x + 1, b.y + 2, b.w, b.h, 14); ctx.fill();
+    ctx.fillStyle = on ? 'rgba(255,248,232,0.98)' : 'rgba(255,255,255,0.90)';
+    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.fill();
+    ctx.strokeStyle = on ? 'rgba(184,134,11,0.80)' : 'rgba(90,80,65,0.26)';
+    ctx.lineWidth = on ? 2 : 1.5;
+    rr(ctx, b.x, b.y, b.w, b.h, 14); ctx.stroke();
+    ctx.fillStyle = on ? '#8a5a06' : INK2; ctx.font = 'bold 15px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('挂机', b.x + b.w/2, b.y + b.h/2 + 1);
+  }
 
   // ---- 暂停按钮 ----
   if (canPause()){
@@ -5483,6 +5619,12 @@ function onDown(ev){
   G.dragger = null;
 
   // 暂停按钮
+  if (canPause() && inRect(p, BTN_AUTO)){
+    uiTap = true; sfx('click');
+    const on = setAutopilot(!G.autopilot);
+    toast(on ? '挂机 · 电脑接管我方（再点一下取消）' : '已取消挂机', GOLD);
+    return;
+  }
   if (canPause() && inRect(p, BTN_PAUSE)){ uiTap = true; setPaused(true); return; }
 
   if (G.phase === 'intro'){
@@ -5562,6 +5704,13 @@ function onDown(ev){
 
   // 场上行进的兵：也能点开看（按它被画在哪个视口里算命中）
   for (const e of G.marchers){ if (hitMarcher(e, p, marcherView(e))){ uiTap = true; inspectAt('foe', e); return; } }
+
+  // 挂机中：手牌/棋盘交给电脑，手动拖牌会和它的决策打架
+  if (G.autopilot){
+    uiTap = true;
+    toast('挂机中 · 点「挂机」可以取消');
+    return;
+  }
 
   // 拿手牌
   const hi = handIndexAt(p);
@@ -5760,14 +5909,15 @@ const REC_MAX_BYTES = 2 * 1024 * 1024;
 const HAS_LS = (() => { try { localStorage.getItem(REC_KEY); return true; } catch(e){ return false; } })();
 let LS_OK = HAS_LS;
 const REC_MEM = [];                        // 会话内存储（localStorage 不可用时的兜底）
-const REC = { on:false, seed:0, aiLevel:0, events:[], start:0 };
+const REC = { on:false, seed:0, aiLevel:0, events:[], auto:[], start:0 };   // auto = 挂机开关时间线 [[步, 0|1]]
 let LAST_REC = null;                       // 刚结束的那一局（结算页「回放本局」用）
-const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null, back:'over', prevG:null };
+const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null, back:'over', prevG:null, auto:[], ai:0 };
 let IN_HOOK = null;                        // 回放时把录好的坐标直接喂进输入层
 
 function recBegin(){
   if (NET.pvp || REPLAY.on){ REC.on = false; return; }
   REC.on = true; REC.seed = G.seed; REC.aiLevel = AI_LV; REC.events = []; REC.start = Date.now();
+  REC.auto = [[0, G.autopilot ? 1 : 0]];      // 开局是不是挂机，回放要从第 0 步就摆正
   SIM.n = 0; SIM.acc = 0;                  // 事件按「开战后的第几步」编号
 }
 /* 这一下点击是不是纯「看」的动作（放大敌军、看详情、暂停/菜单）：
@@ -5858,31 +6008,37 @@ function recUpload(rec){
 function recFinish(){
   if (!REC.on) return;
   REC.on = false;
-  if (!REC.events.length) return;          // 一步没动过，不留记录
+  // 一步没动过、也没挂过机 → 没内容，不留记录（挂机局只有 auto 时间线，同样要留）
+  const hadAuto = REC.auto.some(a => a[1]);
+  if (!REC.events.length && !hadAuto) return;
   LAST_REC = { v:2, ts:Date.now(), mode:'solo', seed:REC.seed, aiLevel:REC.aiLevel, result:G.result,
-               time:+G.time.toFixed(1), wave:G.wave, events:REC.events };
+               time:+G.time.toFixed(1), wave:G.wave, events:REC.events, auto:REC.auto };
   recSave(LAST_REC);
   recUpload(LAST_REC);                     // 顺手往服务器存一份（能存才存）
 }
 /* 结算页要回放的那一局：优先「刚打完的」；
    万一进程内的 LAST_REC 丢了（刷新过页面 / 中途异常），就按种子从存档里找同一局。 */
 function replayRecForOver(){
-  if (LAST_REC && LAST_REC.events && LAST_REC.events.length) return LAST_REC;
+  const usable = r => !!(r && ((r.events && r.events.length) || (r.auto && r.auto.some(a => a[1]))));
+  if (usable(LAST_REC)) return LAST_REC;
   const seed = G.seed >>> 0;
   const all = recLoad();
   for (let i = all.length - 1; i >= 0; i--){
     const r = all[i];
-    if (r && (r.seed >>> 0) === seed && r.events && r.events.length) return r;
+    if (r && (r.seed >>> 0) === seed && usable(r)) return r;
   }
   return null;
 }
 /* 回放：同种子重新开局，在录下来的那一步喂回同样的输入，2 倍速播完
    back：播完 / 退出后回到哪 —— 'over'（结算页，默认）| 'records'（对局记录页） */
 function startReplay(rec, back){
-  if (!rec || !rec.events || !rec.events.length){ toast('这一局没有可回放的操作'); return; }
+  const hasAuto = !!(rec && rec.auto && rec.auto.some(a => a[1]));
+  if (!rec || (!hasAuto && !(rec.events && rec.events.length))){ toast('这一局没有可回放的操作'); return; }
+  if (!rec.events) rec.events = [];        // 纯挂机局：没有指针操作，只有开关时间线
   REPLAY.back = back || 'over';
   REPLAY.rec = rec; REPLAY.ev = recUpgrade(rec.events); REPLAY.i = 0;
   REPLAY.speed = 2; REPLAY.dispatching = false;
+  REPLAY.auto = Array.isArray(rec.auto) ? rec.auto : []; REPLAY.ai = 0;   // 旧录像没有 auto：全程按手动播
   /* 从结算页点进来的：先把那一局的终局状态收好。
      回放会 newGame 覆盖 G，退出时得把结算画面原样还回去，而不是甩给玩家一个空的新局。 */
   REPLAY.prevG = (REPLAY.back === 'over' && G.phase === 'over') ? G : null;   // 只收「结算画面」
@@ -5891,6 +6047,7 @@ function startReplay(rec, back){
   try {
     newGame(rec.seed >>> 0);
     setAILevel(rec.aiLevel | 0);
+    G.autopilot = false;                     // 交给 REPLAY.auto 时间线摆正
     SIM.n = 0; SIM.acc = 0;
     startBattle();                         // 录制也是从「备战」这一秒开始
   } catch(e){                              // 启动失败必须说出口，不能停在原地像没点一样
@@ -5919,6 +6076,10 @@ function replayAction(x0, y0, x1, y1){
 }
 function replayPump(){
   if (!REPLAY.on) return;
+  // 挂机开关按录制时的步号还原（挂机是内部决策，没有指针事件可录）
+  while (REPLAY.ai < REPLAY.auto.length && REPLAY.auto[REPLAY.ai][0] <= SIM.n){
+    G.autopilot = !!REPLAY.auto[REPLAY.ai++][1];
+  }
   while (REPLAY.i < REPLAY.ev.length && REPLAY.ev[REPLAY.i][0] <= SIM.n){
     const a = REPLAY.ev[REPLAY.i++];
     replayAction(a[1], a[2], a[3], a[4]);
@@ -6102,7 +6263,7 @@ function snapshotData(){
   /* 过一遍 JSON：把 undefined 抹成「没有这个键」。
      否则浏览器里是 null、Node 里是 undefined，同一局面互相比对会出现假差异。 */
   return JSON.parse(JSON.stringify({
-    seed:G.seed, phase:G.phase, paused:!!G.paused, pvp:!!NET.pvp,
+    seed:G.seed, phase:G.phase, paused:!!G.paused, pvp:!!NET.pvp, autopilot:!!G.autopilot,
     time:+G.time.toFixed(2), wave:G.wave,
     nextWaveIn:+Math.max(0, WAVE_GAP - G.waveT).toFixed(2),
     prepT:(G.phase === 'prep') ? +G.prepT.toFixed(2) : undefined,
@@ -6137,7 +6298,8 @@ window.__api = {
   get LAST_REC(){ return LAST_REC; },
   spawnWave, spawnRaider, newMarcher, newUnit, enemySpec, startWave, buyItem, useActive,
   castSkill, openShop, closeShop, nextShopWave, ITEMS, endGame, recycleValue,
-  setPaused, togglePause, pauseAction, canPause, BTN_PAUSE,
+  setPaused, togglePause, pauseAction, canPause, BTN_PAUSE, BTN_AUTO,
+  setAutopilot, get AUTOPILOT(){ return AUTOPILOT; }, aiThink, botShopStep, sideBoard, sideHand, landOKOf,
   aiTick, aiEnlist, aiPlace, sendAttack, pickHeroChar, pickHeroCharAI, rollTile, aiRollTile, sendCharToRoad, sendTileToRoad, freeRoadSlots, enlistSide, moneyOf, addMoney,
   HERO_CHAR_POOL0, drawPoolChar, takePoolChar, refillPool,
   addHeroXp, heroXpNeed, heroMaxLv, heroXpGain, releaseQueue, dealFrom, HERO_XP,

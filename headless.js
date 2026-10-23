@@ -7,6 +7,9 @@
  *   node headless.js                      交互模式：stdin 每行一条 JSON 命令，stdout 回 JSON
  *   node headless.js scenario.json        脚本模式：命令数组一次跑完
  *   node headless.js --replay <记录文件>   重放一局存档（records/*.jsonl）
+ *   node headless.js --selfplay 5 [aiLevel] [seed] [--lives=15]
+ *                                          两边都交给 bot 自对弈，报胜负/波次/异常
+ *                                          --lives 只用于测试：把双方主公命数调高，让对局长到中后期
  *
  * 命令（JSON）：
  *   {"op":"newGame","seed":123,"aiLevel":2}
@@ -21,6 +24,7 @@
  *   {"op":"shop","buy":"liangcao"} / {"op":"shop","close":true}
  *   {"op":"useActive","slot":0}
  *   {"op":"startWave"} / {"op":"set","key":"mantou","value":99}
+ *   {"op":"autopilot","v":true}                挂机：电脑接管我方（两边都是 bot 即自对弈）
  *   {"op":"stop"}
  *
  * 对局存档：records/<时间>_seed<种子>.jsonl（JSON Lines）
@@ -109,9 +113,10 @@ function loadGame(){
 let recFile = null;
 let recEnded = true;
 let REPLAYING = false;      // 重放时不写新存档
+let NO_REC = false;         // 批量自对弈：不写存档文件
 
 function recStart(seed, aiLevel){
-  if (REPLAYING) return;
+  if (REPLAYING || NO_REC) return;
   if (!fs.existsSync(RECORDS_DIR)) fs.mkdirSync(RECORDS_DIR);
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   recFile = path.join(RECORDS_DIR, `${stamp}_seed${seed}.jsonl`);
@@ -242,6 +247,8 @@ const HANDLERS = {
     return { ok:true, key:a.key, value:a.value };
   },
   pause:    (a) => { api.setPaused(!!a.v); return { ok:true, paused:api.G.paused }; },
+  autopilot:(a) => { const v = api.setAutopilot(a.v === undefined ? true : !!a.v);
+                     return { ok:true, autopilot:v }; },
   ping:     () => ({ ok:true, time:+api.G.time.toFixed(2), phase:api.G.phase, wave:api.G.wave }),
   stop:     () => ({ ok:true, bye:true }),
 };
@@ -333,11 +340,100 @@ function replayWeb(file){
   out({ replay:file, count:results.length, results });
 }
 
+
+/* ---------------- 自对弈：两边都交给 bot，批量跑局找 bug ----------------
+   用法：node headless.js --selfplay 10 [aiLevel]
+   输出：每局一行摘要 + 汇总（胜负分布、平均波次、异常清单）。
+   检查的是「规则不变量」，不是胜负 —— 胜负只是参考，异常才是要修的东西。 */
+function checkGame(G){
+  const bad = [];
+  const who = (v) => v ? 'ai' : 'me';
+  const boards = [['我方', G.board, true], ['敌方', G.enBoard, false]];
+  for (const [tag, board, mine] of boards){
+    for (let i = 0; i < board.length; i++){
+      const u = board[i];
+      if (!u) continue;
+      const at = tag + '第' + i + '格';
+      if (u.hp !== undefined && !(u.hp > 0)) bad.push(at + ' 血量为 ' + u.hp + ' 还留在盘上');
+      if (u.atk !== undefined && !isFinite(u.atk)) bad.push(at + ' 攻击力非数字');
+      // 名将横占两格：非锚点格里放的是同一个对象，属于正常，只查「这格不在它的占格里」
+      if (u.cells && u.cells.length && u.cells.indexOf(i) < 0) bad.push(at + ' 不在该单位的占格列表里');
+      if (api.isPathCell(i, mine)) bad.push(at + ' 兵压在路格上');
+      if (api.isAduCell(i, mine)) bad.push(at + ' 兵压在主公格上');
+      if (u.kind === 'unit' && !u.type) bad.push(at + ' 兵种为空');
+      if (u.kind === 'hero'){
+        const cs = u.cells || [];
+        if (cs.length !== 2) bad.push(at + ' 名将占格数 = ' + cs.length);
+        else if (Math.abs(cs[0] - cs[1]) !== 1) bad.push(at + ' 名将两格不相邻');
+      }
+    }
+  }
+  for (const m of G.marchers){
+    if (!isFinite(m.x) || !isFinite(m.y)) bad.push('行军兵坐标非数字');
+    if (!(m.hp > 0)) bad.push('行军兵血量 = ' + m.hp + ' 还在场上');
+    if (!m.route || !m.route.length) bad.push('行军兵没有路线');
+  }
+  if (G.marchers.length > 220) bad.push('场上行军兵过多：' + G.marchers.length);
+  if (G.myLife < 0 || G.enLife < 0) bad.push('主公命数变负');
+  if (G.myLife > G.myMax || G.enLife > G.enMax) bad.push('主公命数超过上限');
+  if (G.mantou < -1e-9 || G.ai.mantou < -1e-9) bad.push('馒头变负');
+  if (G.hand.length !== 0 && G.hand.length !== 5) bad.push('我方手牌格数 = ' + G.hand.length);
+  if (G.ai.hand.length !== 0 && G.ai.hand.length !== 5) bad.push('敌方手牌格数 = ' + G.ai.hand.length);
+  if (G.wave > 200) bad.push('波次失控：' + G.wave);
+  return bad;
+}
+
+function selfplay(count, aiLevel, firstSeed, lives){
+  NO_REC = true;
+  const games = [];
+  const issues = [];
+  let wins = 0, loses = 0, stuck = 0;
+  for (let i = 0; i < count; i++){
+    const seed = (firstSeed + i * 7919) >>> 0;
+    api.setAILevel(aiLevel);
+    api.newGame(seed);
+    if (lives > 0){ api.G.myLife = api.G.myMax = lives; api.G.enLife = api.G.enMax = lives; }
+    api.setAutopilot(true);
+    api.startBattle();
+    let steps = 0, sawShop = 0;
+    const LIMIT = 30000;                       // 3000 秒（游戏内时间）还没打完 = 卡死
+    while (!api.G.result && steps < LIMIT){
+      api.step(0.1); steps++;
+      if (api.G.phase === 'shop') sawShop++;
+    }
+    const G = api.G;
+    const bad = checkGame(G);
+    if (!G.result){ stuck++; bad.push('跑满 ' + (LIMIT/10) + ' 秒仍未分胜负（停在 phase=' + G.phase + '）'); }
+    if (G.result === 'win') wins++; else if (G.result === 'lose') loses++;
+    if (bad.length) issues.push({ seed, issues: bad });
+    games.push({ seed, result:G.result || 'none', wave:G.wave, time:+G.time.toFixed(0),
+                 myLife:G.myLife, enLife:G.enLife, shopFreezes:sawShop,
+                 meGuards:api.guardCount ? api.guardCount(G.board) : G.board.filter(Boolean).length,
+                 aiGuards:G.enBoard.filter(Boolean).length,
+                 meDug:Object.keys(G.unlocked).length - 7, aiDug:Object.keys(G.aiUnlocked).length });
+  }
+  const avg = k => +(games.reduce((a, g) => a + g[k], 0) / games.length).toFixed(1);
+  return { ok: issues.length === 0, count, aiLevel, wins, loses, stuck,
+           avgWave:avg('wave'), avgTime:avg('time'), avgMyDug:avg('meDug'), avgAiDug:avg('aiDug'),
+           avgMyGuards:avg('meGuards'), avgAiGuards:avg('aiGuards'),
+           games, issues };
+}
+
 function main(){
   ({ api } = loadGame());
   const arg = process.argv[2];
   if (!arg) return interactive();
   if (arg === '--replay') return replay(process.argv[3]);
+  if (arg === '--selfplay'){
+    const rest = process.argv.slice(3);
+    const livesArg = rest.find(a => a.startsWith('--lives='));
+    const lives = livesArg ? Number(livesArg.split('=')[1]) : 0;
+    const nums = rest.filter(a => !a.startsWith('--'));
+    const n = Math.max(1, Number(nums[0] || 5));
+    const lv = Number(nums[1] !== undefined ? nums[1] : 1);
+    const seed = Number(nums[2] || 1001);
+    return out(selfplay(n, lv, seed, lives));
+  }
   if (arg === '--replay-web') return replayWeb(process.argv[3]);
   return runScript(path.resolve(arg));
 }
