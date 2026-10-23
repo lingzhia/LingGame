@@ -2956,9 +2956,9 @@ function step(dt){
 }
 function startBattle(){
   if (NET.screen !== 'game') showScreen('game');   // 开打就一定在对局屏（首页/联机页点进来也走这里）
-  G.phase = 'prep'; G.prepT = 15;
+  G.phase = 'prep'; G.prepT = 5;
   recBegin();                                      // 单人对局：从备战这一秒开始录
-  toast('备战 15 秒 · 快布阵');
+  toast('备战 5 秒 · 快布阵');
 }
 
 /* ---------------- 暂停 ---------------- */
@@ -2978,7 +2978,7 @@ function pauseAction(id){
   if (id === 'restart'){
     G.paused = false;
     newGame(); startBattle();
-    toast('重开一局 · 备战 15 秒');
+    toast('重开一局 · 备战 5 秒');
   }
 }
 
