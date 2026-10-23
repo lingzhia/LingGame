@@ -1234,11 +1234,11 @@ function dropOnCellRaw(src, idx){
     if (from !== undefined){ clearCells(G.board, from); refreshBonds(); }
     const u = UNITS[src.type];
     burst(m.x, m.y, 14, GOLD);
-    floater(m.x, m.y - 26, '上路 · 向出兵格排队', GOLD);
+    floater(m.x, m.y - 26, '上路 · 主公前方列队', GOLD);
     sfx('enlist');
     toast(from !== undefined
-      ? ('调兵 · ' + (u ? u.name : '兵') + ' 上路，正赶去出兵格后面排队，下一波随军出击')
-      : ('上路 · ' + (u ? u.name : '兵') + ' 沿路赶去出兵格后面排队，下一波随军出击'));
+      ? ('调兵 · ' + (u ? u.name : '兵') + ' 上路，在主公前方列队，下一波随军出击')
+      : ('上路 · ' + (u ? u.name : '兵') + ' 在主公前方列队，下一波随军出击'));
     return 'place';
   }
 
@@ -1502,8 +1502,8 @@ function enemySpec(n, i, salt){
 }
 
 /* ---------------- 行军兵（双方共用一套） ----------------
-   owner:'ai' = 电脑的兵，从我的半场路头下来，打我的主公
-   owner:'me' = 我方的出击兵，从路上朝对面走，打电脑的主公
+   owner:'ai' = 电脑的进攻兵：从对面主公跟前出发，沿对面的路走到头，过缝进我的路，打我的主公
+   owner:'me' = 我方的进攻兵：从我主公跟前出发，沿我的路走到头，过缝进对面的路，打对面主公
    兵种、品阶、克制、血量、攻击全走 UNITS / TIER 同一张表 —— 两边没有任何数值差。 */
 function newMarcher(owner, key, level, elite){
   const u = UNITS[key];
@@ -1525,23 +1525,24 @@ function newMarcher(owner, key, level, elite){
     jit: (Math.random() - 0.5) * 9,
   };
 }
-/* 自动进攻兵：owner 的兵从自己这一侧的路头出生，沿路走向对面的主公 */
+/* 自动进攻兵：owner 的兵从「主公前方第一个路格」出生（不再是出兵口凭空刷敌兵），
+   沿自家路走到头，过缝进入对面半场的路，一路打到对面主公。
+   两军纵队在同一条路上迎面对冲 —— 谁更能打，战线就往谁家推。 */
 function spawnWave(owner, spec){
   const m = newMarcher(owner, spec.key, spec.lv, spec.elite);
   if (!m) return null;
-  const halfMine = owner === 'ai';            // 敌兵走我的半场；我的进攻兵走对面半场
+  const halfMine = owner === 'me';            // 兵从自己主公跟前出发
   const pts = pathPoints(halfMine);
-  const adu = halfMine ? ADU_M : ADU_E;
-  m.x = pts[0].x; m.y = pts[0].y;
-  m.route = forwardRoute(pts, 0, adu);
+  const k = pts.length - 1;                   // 主公前方第一个路格
+  m.x = pts[k].x; m.y = pts[k].y;
+  m.route = raiderRoute(halfMine, k);
+  m.crossRi = k;                              // route[k] = 中缝对面第一点：过了它就算踏上敌方路
   G.marchers.push(m);
   return m;
 }
-/* 放在路格上的兵 -> 待命兵：沿自家这条路往「出兵格」方向走，一格一个往后排，
-   排头站出兵格的**下一格**（出兵格永远留空，给下一波出兵让位）；
-   下一波开战时（startWave）统一放行，跟着这一波一起越过中缝打过去。
-   排队中的兵照样会跟迎面上来的敌兵互殴 —— 站在路上就是一道人墙。
-   在我方路上越往后越熟门熟路：每前进一格，行军速度翻一倍（封顶 8 倍）。 */
+/* 放在路格上的兵 -> 待命兵：站在上路的原地编入纵队（一格一个），
+   集结点就在主公前方 —— 开战时（startWave）统一放行，跟着大部队一路压过中缝。
+   排队中的兵照样会跟迎面上来的敌兵互殴 —— 站在路上就是一道人墙。 */
 let RAIDER_SEQ = 0;                    // 入队顺序：同距离时先来的排前面
 function spawnRaider(owner, cell, key, level){
   const halfMine = owner === 'me';
@@ -1555,6 +1556,7 @@ function spawnRaider(owner, cell, key, level){
   m.x = cellCX(colOf(cell));
   m.y = cellCY(colOf(cell), rowOf(cell), baseY);
   m.route = raiderRoute(halfMine, k);
+  m.crossRi = k;                         // route[k] = 中缝对面第一点（自家路 / 敌方路的分界）
   m.raider = true;
   m.originCell = cell;                   // 联机：真正出击时把这格报给对面派兵
   m.queued = true;                       // 待命：等下一波
@@ -1596,9 +1598,8 @@ function routeRemainTo(m, idx){
   }
   return d;
 }
-/* 我方路上：每前进一格速度翻一倍。
-   起步就给 4 倍（本来 0.5 格/秒太磨人，走一格要 2.25 秒），封顶 32 倍 = 16 格/秒，
-   一条 20 格的路从最末一格跑回出兵口也就 2 秒左右。 */
+/* 自家半场的加速倍率（熟门熟路）：目前待命兵原地列队、出征兵匀速赶路，
+   暂时没有调用方 —— 留着当节奏旋钮，想让纵队跑快一点时启用。 */
 const OWN_PATH_SPD_BASE = 4;
 const OWN_PATH_SPD_CAP = 32;
 function ownPathSpeedMul(m){
@@ -1864,19 +1865,12 @@ function updateMarchers(dt){
     const far = ghost ? null : nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD, true);
     if (far) strikeDefender(m, far);
 
-    // 4) 待命兵：按格子排队。排头站出兵格的下一格，第二人站再后一格 …… 一格一个人；
-    //    出兵格永远留空。走到自己的格子就停，绝不越过中缝。
-    //    我方路上每前进一格速度翻倍（ownPathSpeedMul），所以越排越快地归位。
-    if (m.queued){
-      const slot = m.headRi - 1 - queueRank(m);     // 该站的那一格（route 下标；-1 = 顶到出兵格前）
-      if (slot >= 0 && m.ri <= slot){
-        const rem = routeRemainTo(m, slot);
-        if (rem > 0.5) marchForward(m, Math.min(sp * ownPathSpeedMul(m) * dt, rem));
-        else { const p = m.route[slot]; m.x = p.x; m.y = p.y; m.ri = slot + 1; }
-      }
-      continue;
-    }
+    // 4) 待命兵：站在上路的原地不动（在主公前方编入纵队），开战统一放行。
+    //    对撞、挨打照常 —— 站在路上就是一道人墙。
+    if (m.queued) continue;
 
+    // 5) 出征行军：匀速赶路。两军纵队在同一条路上迎面推进，
+    //    在火力对等的地方顶成战线 —— 守军火力、克制、升级把战线往对面推。
     const adv = far ? sp * ATK_MOVE_MUL : sp;
 
     if (marchForward(m, adv * dt)){
@@ -2909,8 +2903,8 @@ function step(dt){
   G.time += dt;
   if (G.aiShield > 0) G.aiShield -= dt;
 
-  // 下半场出兵：敌军从下半场的敌军出生点下来打我方主公
-  // 联机里这批「敌军」就是对面玩家那边的进攻兵 —— 兵种由同一个种子决定，两端一模一样
+  // 我半场收到的进攻兵：从对面主公跟前出发，穿过中缝走进我的路来打我方主公
+  // 联机里这批兵就是对面玩家那边的进攻兵 —— 兵种由同一个种子决定，两端一模一样
   if (G.spawnLeft > 0){
     G.spawnGap -= dt;
     if (G.spawnGap <= 0){
@@ -2919,7 +2913,7 @@ function step(dt){
       spawnWave('ai', G.spawnQueue.pop() || enemySpec(G.wave, 90, 0));
     }
   }
-  // 上半场出兵：我军从上半场的敌军出生点上去打电脑的主公
+  // 敌方半场收到的进攻兵：从我主公跟前出发，穿过中缝走上对面的路去打电脑的主公
   if (G.aiSpawnLeft > 0){
     G.aiSpawnGap -= dt;
     if (G.aiSpawnGap <= 0){
@@ -4431,7 +4425,7 @@ function drawIntro(){
   const lines = [
     ['一', '两块战场', '上下各有一块 8×8 棋盘，各守一个主公；不设时间上限，哪边主公先被打光就输'],
     ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局 7 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
-    ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝自动排队，落点不用挑：兵营来的从主公跟前一格起往后排、场上调来的就近入列（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
+    ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝在主公前方列队待命（兵营来的从主公跟前一格起往后排、场上调来的就近入列，出兵格永远留空），开战时全队压上，穿过中缝沿对面的路打过去'],
     ['四', '征兵', '开局 8 馒头；征一次 5 个，之后每征一次 +1，只涨不降（旧兵与铲子回收成馒头）；兵营里的单字会在征兵时自动换成 1 级兵，直接排上我方路'],
     ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；主公挨打只掉命、不给钱'],
     ['六', '合成与成长', '同种同阶相叠升阶（1+1 → 2 阶）；两字相邻召将；名将杀敌攒经验自动升阶 —— 合成不是唯一的路'],
