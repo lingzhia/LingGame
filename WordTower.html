@@ -516,7 +516,9 @@ const HERO_CHARS = Object.keys(CHAR_HERO);   // 全部单字（去重后 14 个�
    「关」×3（关羽/关兴/关平）、「张」×3（张飞/张苞/张翼）、「黄」×3（黄忠/黄祖/黄盖），
    其余各 ×1。
    所以「羽」在一池里只有一张：一轮里最多只能召出一个关羽。
-   一轮摸空（24 张发完）后自动重洗，恢复成完整的 24 张重新开始 ——
+   一轮摸空后自动重洗 —— 但重洗不是洗回完整的 24 张：
+   双方场上已经有的字（守军单字、名将名字里的字）不回池，
+   场上站着的武将，对面就再也拼不出第二个同名将 —— 靠字池硬约束，不靠落子判定。
    双方共用同一个池，谁摸到算谁的。 */
 const HERO_CHAR_POOL0 = [];
 for (const n in HEROES) HERO_CHAR_POOL0.push(HEROES[n].a, HEROES[n].b);
@@ -537,9 +539,24 @@ function takePoolChar(c){
 /* 从池子里随机摸一张：preferGold = 优先摸金将的字（招贤被动） */
 const GOLD_CHARS = [];
 for (const n of GOLD_HEROES) GOLD_CHARS.push(HEROES[n].a, HEROES[n].b);
-/* 一轮 24 张摸空 -> 重新洗满。返回 true 表示这次是重洗后才发的牌 */
+/* 收集「双方场上」的字：守军单字 + 名将名字里的两个字（手牌不算，还没上场） */
+function fieldCharSet(){
+  const used = {};
+  for (const b of [G.board, G.enBoard]){
+    for (const u of b){
+      if (!u) continue;
+      if (u.kind === 'char') used[u.char] = true;
+      else if (u.kind === 'hero' && HEROES[u.type]){ used[HEROES[u.type].a] = true; used[HEROES[u.type].b] = true; }
+    }
+  }
+  return used;
+}
+/* 一轮摸空 -> 重洗：完整 24 张去掉双方场上的字再洗入。
+   极端情况全字都在场上时退回全量（总得有牌可发），返回 true 表示这次是重洗后才发的牌 */
 function refillPool(){
-  G.charPool = shuffleInPlace(HERO_CHAR_POOL0.slice());
+  const used = fieldCharSet();
+  const left = HERO_CHAR_POOL0.filter(c => !used[c]);
+  G.charPool = shuffleInPlace(left.length ? left : HERO_CHAR_POOL0.slice());
   G.poolRound = (G.poolRound || 1) + 1;
   return true;
 }
@@ -948,7 +965,7 @@ function rollTile(){
 function pickHeroChar(){
   if (!G.charPool || !G.charPool.length){
     refillPool();
-    toast('字池摸空 · 重新洗入 24 张');
+    toast('字池摸空 · 重洗（场上的字不回池）');
   }
   const held = [];
   for (const t of G.hand) if (t && t.kind==='char') held.push(t.char);
@@ -1030,7 +1047,29 @@ function freeRoadSlots(owner){
   }
   return n;
 }
-/* 把兵营里的一张牌送上路（从路尾往前找空位，一格一个）：
+/* 上路的落点不再由玩家挑，只看来源：
+   兵营（下方 5 格）拖来 -> 从主公跟前那格起、沿路往出兵格方向找第一个空位；
+   场上守军拖来 -> 离它最近的路格优先。
+   出兵格（k=0）永远留空；全路排满返回 null。 */
+function pickQueueCell(mine, fromCell){
+  const cells = mine ? PATH_CELLS_M : PATH_CELLS_E;
+  const ks = [];
+  for (let k = 1; k < cells.length; k++) ks.push(k);
+  if (fromCell == null){
+    ks.sort((a, b) => b - a);                      // 主公前方 1 格最先
+  } else {
+    const fc = colOf(fromCell), fr = rowOf(fromCell);
+    ks.sort((a, b) =>
+      (Math.abs(colOf(cells[a]) - fc) + Math.abs(rowOf(cells[a]) - fr)) -
+      (Math.abs(colOf(cells[b]) - fc) + Math.abs(rowOf(cells[b]) - fr)));
+  }
+  for (const k of ks){
+    const p = roadCellPos(cells[k], mine);
+    if (roadCellFree(p.x, p.y)) return cells[k];
+  }
+  return null;
+}
+/* 把兵营里的一张牌送上路（落点由 pickQueueCell 自动分配）：
    兵 —— 原兵种、原阶直接排进队列，不打折；
    字 —— 字本身 1 血不能打，换成一个随机 1 级兵再上路；
    名将 / 铲子 —— 上不了路（名将占两格），返回 null，由调用方折馒头。 */
@@ -1041,15 +1080,11 @@ function sendTileToRoad(owner, tile){
   else if (tile.kind === 'char'){ key = pick(BASE_KEYS); lv = 1; }
   else return null;
   const mine = owner !== 'ai';
-  const cells = mine ? PATH_CELLS_M : PATH_CELLS_E;
-  for (let k = cells.length - 1; k >= 1; k--){
-    const cell = cells[k];
-    const p = roadCellPos(cell, mine);
-    if (!roadCellFree(p.x, p.y)) continue;
-    const m = spawnRaider(mine ? 'me' : 'ai', cell, key, lv);
-    if (m){ burst(m.x, m.y, 12, mine ? GOLD : SEAL); return m; }
-  }
-  return null;
+  const cell = pickQueueCell(mine, null);          // 兵营来的：主公前方 1 格起往后排
+  if (!cell) return null;
+  const m = spawnRaider(mine ? 'me' : 'ai', cell, key, lv);
+  if (m) burst(m.x, m.y, 12, mine ? GOLD : SEAL);
+  return m;
 }
 /* 旧名字：只送一个「字」上路（别的调用点还在用） */
 function sendCharToRoad(owner){ return sendTileToRoad(owner, { kind:'char' }); }
@@ -1191,8 +1226,10 @@ function dropOnCellRaw(src, idx){
   // 来源既可以是手牌，也可以是已经摆在格子上的兵 —— 把后排的兵挪到路上参战。
   if (isPathCell(idx, true)){
     if (src.kind !== 'unit'){ toast('只有普通兵能上路 · 名将与单字留在后半场'); sfx('hit'); return 'fail'; }
-    if (idx === PATH_CELLS_M[0]){ toast('出兵格要空着 · 兵排它后面一格起'); sfx('hit'); return 'fail'; }
-    const m = spawnRaider('me', idx, src.type, src.level);
+    // 落点自动分配：兵营来的从主公跟前起排，场上调来的就近入列 —— 拖到路上哪一格都一样
+    const cell = pickQueueCell(true, from);
+    if (!cell){ toast('路上已经排满 · 没有空位了'); sfx('hit'); return 'fail'; }
+    const m = spawnRaider('me', cell, src.type, src.level);
     if (!m){ toast('这一格不适合出击'); sfx('hit'); return 'fail'; }
     if (from !== undefined){ clearCells(G.board, from); refreshBonds(); }
     const u = UNITS[src.type];
@@ -4394,7 +4431,7 @@ function drawIntro(){
   const lines = [
     ['一', '两块战场', '上下各有一块 8×8 棋盘，各守一个主公；不设时间上限，哪边主公先被打光就输'],
     ['二', '熟地与路', '两点之间那串蛇形格子是「路」，每局重掷；开局 7 格熟地能摆兵，其余荒地要用铲子一格格开垦'],
-    ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝沿自家路赶到出兵格后面、一格一个排好队（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
+    ['三', '守军与列队', '拖到熟地＝守军，路外的敌兵碰不到它；拖到路上（手牌或场上的兵都行）＝自动排队，落点不用挑：兵营来的从主公跟前一格起往后排、场上调来的就近入列（出兵格永远留空），我方路上每前进一格速度翻倍，下一波开战时随军一起压上'],
     ['四', '征兵', '开局 8 馒头；征一次 5 个，之后每征一次 +1，只涨不降（旧兵与铲子回收成馒头）；兵营里的单字会在征兵时自动换成 1 级兵，直接排上我方路'],
     ['五', '军费', '馒头只来自杀敌：杀一个兵 1 个（农民/粮草被动按比例加成）；主公挨打只掉命、不给钱'],
     ['六', '合成与成长', '同种同阶相叠升阶（1+1 → 2 阶）；两字相邻召将；名将杀敌攒经验自动升阶 —— 合成不是唯一的路'],
