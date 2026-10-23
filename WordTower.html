@@ -1388,10 +1388,7 @@ function waveTier(n){ return clamp(1 + Math.floor((n-1)/4), 1, MAX_TIER); }
    想整体调难度就动这一个旋钮 —— 但一旦不等于 1，两边就不再对称了。
    只压血与攻，不压出手速度（攻速是兵种属性，出征不打折）。 */
 const MARCH_SCALE = 1;
-/* 行军兵的血量补偿：兵在路上只顾赶路，攻击力基本没机会打出来，
-   作为补偿给一点肉 —— 原来是 ×2（等于凭空多一整个品阶，波次直接打不动），
-   现在只 +10%：够表达「路上更耐打」，又不至于让守军打不动兵。 */
-const MARCH_HP_MUL = 1.1;
+/* 路上兵不再有数值加成：进攻单位和防守单位同一张表、同一个数 —— 差别只在于谁站着、谁赶路。 */
 /* 17 波之后单兵品阶封顶 5 阶，若只加数量两边会无限对峙。
    改为「精锐化」：17 波起每波血 +30%、移速 +20%（按超出 16 的波数叠乘），
    一波比一波快且硬，必然分出胜负。 */
@@ -1521,7 +1518,7 @@ function newMarcher(owner, key, level, elite){
   const st = TIER[lv];
   const k = MARCH_SCALE;                     // 两边同一个系数，不按 owner 分叉
   const el = Math.max(0, elite | 0);         // 17 波后的精锐层数
-  const hp = Math.round(u.hp * st.hpMul * k * MARCH_HP_MUL * Math.pow(ELITE_HP, el));
+  const hp = Math.round(u.hp * st.hpMul * k * Math.pow(ELITE_HP, el));
   return {
     owner, key, level: lv, elite: el, char: u.char,
     name: u.name + (el ? '+' + el : ''), vs: u.vs || [], hitMode: u.hitMode || 'single',
@@ -1641,7 +1638,8 @@ function releaseQueue(){
 /* 敌兵当前所在的那一格（用来算「有没有守军贴在路边」） */
 
 /* 守军是不是踩在「路」上（含主公格）。
-   规则：只有路上的守军会被行军兵够到、被拦住；路外的守军＝后方火力，谁也打不到它。 */
+   规则：只有路上的守军能「拦停」行军兵；但任何守军（含路外后方阵地）
+   都会被射程内的进攻单位打到 —— 路外的兵是火力点，不是无敌掩体。 */
 function defenderOnRoad(u, idx, mine){
   for (const k of unitCells(u)) if (isRoad(k, mine)) return true;
   return isRoad(idx, mine);
@@ -1699,8 +1697,8 @@ const ATK_MOVE_MUL = 0.18;
    要让电脑弱一点，去动 AI 的决策（aiTick 频率、布阵打分、征兵节奏），别再动这里。 */
 const MY_HP_MUL     = 1;
 const MY_DEF_MUL    = 1;
-const MY_REGEN_IDLE = 5;      // 脱战回血：双方同一条规则
-const MY_REGEN_PCT  = 0.30;
+const MY_REGEN_IDLE = 3;      // 脱战回血：双方同一条规则
+const MY_REGEN_PCT  = 0.20;
 const MY_DEF_FLOOR  = 0.35;   // 与羁绊减伤共用的下限，别让减伤叠爆
 
 /* 给新落地的守军补上加成。幂等：一个单位只会加一次（打 buff 标记）。
@@ -1813,7 +1811,10 @@ function strikeDefender(m, tgt){
 const DUEL_R = 46;
 
 /* 行军兵的统一主循环：两边的兵走同一套逻辑，只有方向与结算系数不同。
-   推进优先级：迎面有敌兵 > 贴脸守军 > 射程内守军（边打边走）> 全速推进 */
+   推进优先级：迎面有敌兵 > 贴脸守军 > 射程内守军（边打边走）> 全速推进。
+   冲锋：血量低于一半的进攻单位无视一切阻挡 —— 对撞不再顶停、贴脸守军拦不住、
+   开打也照全速赶路，但仍会出手打射程内的一切目标。 */
+const CHARGE_HP = 0.5;
 function updateMarchers(dt){
   /* ---- 迎面对撞：先全员选目标，再同时出手，最后统一扣血 ----
      「同时出手」是对撞成立的关键：同一帧里双方互相打出的伤害一起生效，
@@ -1856,6 +1857,12 @@ function updateMarchers(dt){
     m.swing = Math.max(0, (m.swing || 0) - dt);
     if (m.hp <= 0){ G.marchers.splice(i,1); continue; }
     if (m.stun > 0){ m.stun -= dt; continue; }
+    const charging = m.hp < m.maxHp * CHARGE_HP;   // 血量过半以下：冲锋状态
+    if (charging && !m.charged){
+      m.charged = true;                            // 只报一次「冲锋」，别刷屏
+      floater(m.x, m.y - 26, '冲锋！', colorOf(m.owner));
+      burst(m.x, m.y, 8, colorOf(m.owner));
+    }
     let sp = m.spd;
     if (m.slowT > 0){ m.slowT -= dt; sp *= 0.4; }
     m.cd -= dt;
@@ -1863,7 +1870,8 @@ function updateMarchers(dt){
 
     // 1) 对面也有兵在同一条路上 -> 迎面顶住，必须打死对方才能继续前进
     //    （伤害在上面「同时出手」那一步已经结算过了；这里只负责站住不动）
-    if (m._duel) continue;
+    //    冲锋中的兵无视对撞：照样互相出招，但不停车
+    if (m._duel && !charging) continue;
 
     // 联机：我派出去的兵只在本机「走给人看」—— 打守军、掉血、扣命都由对面
     // 当作「我这半场的来兵」算完再呈现；本地只保留对撞（两端同输入同结果）。
@@ -1873,10 +1881,11 @@ function updateMarchers(dt){
     // 2) 路上有守军顶着脸 -> 原地厮杀（拦停靠的是「路上的兵」，路外的兵不挡路）
     const defMine = m.owner === 'ai';        // 我要打的是对面那块棋盘上的守军
     const held = ghost ? null : nearestDefender(defMine, m.x, m.y, BLOCK_R, true);
-    if (held){ strikeDefender(m, held); continue; }
+    if (held){ strikeDefender(m, held); if (!charging) continue; }   // 冲锋：打了照走
 
-    // 3) 射程内路上的守军 -> 边打边挪，打得起来就走得慢
-    const far = ghost ? null : nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD, true);
+    // 3) 射程内任何守军（含路外后方阵地）-> 边打边挪，打得起来就走得慢。
+    //    进攻单位同样能伤害防守单位 —— 拦停只归路上的守军（见 2），火力面前人人平等。
+    const far = ghost ? null : nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD);
     if (far) strikeDefender(m, far);
 
     // 4) 待命兵：站在上路的原地不动（在主公前方编入纵队），开战统一放行。
@@ -1885,8 +1894,8 @@ function updateMarchers(dt){
 
     // 5) 出征行军：自家半场 2 倍行军（主场熟门熟路），过缝踏上敌方路恢复常速。
     //    两军纵队在同一条路上迎面推进，在火力对等的地方顶成战线 ——
-    //    守军火力、克制、升级把战线往对面推。
-    const adv = (far ? sp * ATK_MOVE_MUL : sp) * (m.ri < m.crossRi ? 2 : 1);
+    //    守军火力、克制、升级把战线往对面推。冲锋中的兵不吃「边打边慢走」。
+    const adv = (far && !charging ? sp * ATK_MOVE_MUL : sp) * (m.ri < m.crossRi ? 2 : 1);
 
     if (marchForward(m, adv * dt)){
       G.marchers.splice(i,1);
