@@ -1703,6 +1703,7 @@ function damageMarcher(m, d, killer){
      本地一旦也扣血，两边就各有一套血量，画面上必然对不上。 */
   if (NET.pvp && m.owner === 'me') return;
   m.hp -= d; m.hurt = 1; m.flash = 0.25;
+  dmgFloater(m.x, m.y - 14, d);
   if (m.hp <= 0) killMarcher(m, killer);
 }
 /* 两个行军兵迎面撞上：谁也不能过去，各打各的，死一个才放行。
@@ -1728,6 +1729,7 @@ function nearestFoeMarcher(m, r){
 function damageMarcherDuel(m, d, killer){
   if (!m || m.hp <= 0) return;
   m.hp -= d; m.hurt = 1; m.flash = 0.25;
+  dmgFloater(m.x, m.y - 14, d);
   if (m.hp <= 0) killMarcher(m, killer);
 }
 /* 行军兵打对面棋盘上的守军 */
@@ -1739,12 +1741,15 @@ function strikeDefender(m, tgt){
     let d = m.atk * atkMulOf(m.owner) / Math.max(MY_DEF_FLOOR, defMulOf(foeOf(m.owner)));
     if (m.vs && t.u.type && m.vs.indexOf(t.u.type) >= 0) d *= 1.6;   // 克制对守军同样生效
     t.u.hp -= d; t.u.flash = 0.25; t.u.hurt = 1; t.u.idleT = 0;      // 挨打了就重置脱战计时（两边同规则）
+    dmgFloater(t.x, t.y - 16, d);
     burst(t.x, t.y, 3, colorOf(m.owner));
     if (t.u.hp <= 0) killDefender(m.owner === 'ai', t.idx);
   };
   hitDef(tgt);
   // 穿刺沿「我 → 主目标」的方向捅穿一条线；范围把圈内守军全扫一遍
   const mode = hitModeOf(m);
+  m.swing = 0.25;
+  attackFx(m.key, m.x, m.y, tgt.x, tgt.y, colorOf(m.owner));
   if (mode !== 'single'){
     const extra = splashByMarcher(m, tgt);
     for (const t of extra) if (t.u.hp > 0) hitDef(t);
@@ -1778,6 +1783,8 @@ function updateMarchers(dt){
     strikes.push({ m, foe, d, extra: splashByMarcherDuel(m, foe), mode: hitModeOf(m) });
   }
   for (const s of strikes){
+    s.m.swing = 0.25;
+    attackFx(s.m.key, s.m.x, s.m.y, s.foe.x, s.foe.y, colorOf(s.m.owner));
     burst(s.foe.x, s.foe.y, 2, colorOf(s.m.owner));
     damageMarcherDuel(s.foe, s.d, s.m.owner);
     for (const o of s.extra){          // 穿刺 / 范围：顺带把圈里线上的其它敌兵一起打
@@ -1794,6 +1801,7 @@ function updateMarchers(dt){
     m.born += dt;
     m.hurt = Math.max(0, m.hurt - dt*3);
     m.flash = Math.max(0, (m.flash || 0) - dt);
+    m.swing = Math.max(0, (m.swing || 0) - dt);
     if (m.hp <= 0){ G.marchers.splice(i,1); continue; }
     if (m.stun > 0){ m.stun -= dt; continue; }
     let sp = m.spd;
@@ -1996,6 +2004,107 @@ function fxHit(mode, ax, ay, bx, by, r, color){
   else if (mode === 'aoe') G.fx.push({ type:'ring', x:ax, y:ay, r0:16, r1:r, t:0, dur:0.28, color:color });
 }
 
+/* ============================================================
+   兵种形象 · 兵器 · 出手动作（纯视觉层）
+   ------------------------------------------------------------
+   只往 G.fx 推特效、只在画的时候多画几笔，不碰任何结算数据 ——
+   联机两端各自画各自的，同步不受影响。
+   ============================================================ */
+
+/* 伤害数字：从被击中的单位头上飘出（G.floaters 自带上浮，dmg 只是换样式） */
+function dmgFloater(x, y, d){
+  if (!(d > 0)) return;
+  G.floaters.push({
+    x: x + (Math.random()*16 - 8), y: y - 10,
+    text: '−' + Math.round(d), color: '#d8342a',
+    t: 0, dur: 0.72, dmg: true,
+  });
+}
+
+/* 出手特效：每个兵种一式 ——
+   刀＝横斩弧光；弓＝一支箭飞向目标；骑＝蹄尘（范围环由 fxHit 画）；
+   名将＝金色大斩击；枪＝疾刺，穿刺光束由 fxHit 负责，这里不再叠。 */
+function attackFx(type, ax, ay, bx, by, color){
+  if (type === 'dao'){
+    G.fx.push({ type:'slash', x:bx, y:by, t:0, dur:0.20, color:color });
+  } else if (type === 'gong'){
+    G.fx.push({ type:'arrow', x1:ax, y1:ay, x2:bx, y2:by, t:0, dur:0.16, color:color });
+  } else if (type === 'qi'){
+    G.fx.push({ type:'dust', x:ax, y:ay, t:0, dur:0.32, color:color });
+  } else if (type === 'hero'){
+    G.fx.push({ type:'slash', x:bx, y:by, t:0, dur:0.26, color:GOLD, big:true });
+  }
+}
+
+/* 有兵器的兵种（守军卡签只在这几个兵种上画） */
+const WEAPON_OK = { dao:1, qiang:1, gong:1, qi:1 };
+
+/* 兵器图形（局部坐标：+y 是脚跟，-y 是朝敌人的前方；r ≈ 圆盘半径）。
+   守军卡签、行军兵圆盘共用这一套；未知兵种不画。
+   swing ∈ 0..1：出手那一瞬间兵器往前探一截。 */
+function drawWeaponGlyph(type, r, color, swing){
+  const ex = swing ? swing * r * 0.55 : 0;          // 探出去多少
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = color;
+  ctx.fillStyle = color;
+  if (type === 'dao'){
+    // 环首刀：短柄 + 微弧刀身 + 挡手
+    ctx.lineWidth = 2.6;
+    ctx.beginPath();
+    ctx.moveTo(r*0.30, r*0.42);
+    ctx.lineTo(r*0.22, -r*0.20 + ex);
+    ctx.quadraticCurveTo(r*0.20, -r*0.80 + ex, -r*0.34, -r*1.00 + ex);
+    ctx.stroke();
+    ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(r*0.10, r*0.30); ctx.lineTo(r*0.46, r*0.18); ctx.stroke();
+  } else if (type === 'qiang'){
+    // 长枪：直杆 + 枪尖 + 红缨
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.moveTo(r*0.30, r*0.75);
+    ctx.lineTo(r*0.30 - ex*0.25, -r*0.70 - ex);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(r*0.30 - ex*0.25, -r*1.30 - ex);
+    ctx.lineTo(r*0.16 - ex*0.25, -r*0.72 - ex);
+    ctx.lineTo(r*0.44 - ex*0.25, -r*0.72 - ex);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#c0392b';
+    ctx.beginPath(); ctx.arc(r*0.30 - ex*0.25, -r*0.58 - ex, r*0.15, 0, Math.PI*2); ctx.fill();
+  } else if (type === 'gong'){
+    // 弓：弓身弧 + 弦 + 搭箭
+    const bcx = 0, bcy = r*0.45, br = r*0.95;
+    const a0 = -Math.PI*0.78, a1 = -Math.PI*0.22;
+    ctx.lineWidth = 2.4;
+    ctx.beginPath(); ctx.arc(bcx, bcy, br, a0, a1); ctx.stroke();
+    ctx.lineWidth = 1.1;
+    ctx.strokeStyle = 'rgba(70,60,45,0.75)';
+    ctx.beginPath();
+    ctx.moveTo(bcx + br*Math.cos(a0), bcy + br*Math.sin(a0));
+    ctx.lineTo(bcx + br*Math.cos(a1), bcy + br*Math.sin(a1));
+    ctx.stroke();
+    ctx.lineWidth = 1.6; ctx.strokeStyle = '#6b4a22';
+    ctx.beginPath();
+    ctx.moveTo(bcx, bcy + br*0.12);
+    ctx.lineTo(bcx, bcy - br*0.95 - ex);
+    ctx.stroke();
+  } else if (type === 'qi'){
+    // 骑：马首剪影（棋子「马」那一款，简化）
+    ctx.beginPath();
+    ctx.moveTo(-r*0.10, r*0.55);
+    ctx.quadraticCurveTo(-r*0.42, r*0.05, -r*0.16, -r*0.35);
+    ctx.lineTo(r*0.02, -r*0.78);
+    ctx.lineTo(r*0.16, -r*0.52);
+    ctx.quadraticCurveTo(r*0.50, -r*0.34, r*0.36, r*0.08);
+    ctx.quadraticCurveTo(r*0.16, r*0.36, -r*0.10, r*0.55);
+    ctx.closePath();
+    ctx.fill();
+    // 鬃毛
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(-r*0.16, -r*0.30); ctx.lineTo(-r*0.34, -r*0.10); ctx.stroke();
+  }
+}
+
 
 /* 一侧守军的主循环（回血 / 脱战回血 / 大招 / 出手）—— 两边共用这一个函数 */
 function updateSideUnits(dt, mine){
@@ -2054,6 +2163,8 @@ function updateSideUnits(dt, mine){
     }
     u.cd = 1 / Math.max(0.3, u.rate);
     u.swing = 0.26;
+    const apx = unitPos(u, S.baseY);
+    attackFx(u.kind === 'hero' ? 'hero' : u.type, apx.x, apx.y, tgt.x, tgt.y, S.color);
     if (Math.random() < 0.28) sfx('hit');
   }
 }
@@ -3081,6 +3192,20 @@ function drawCard(x, y, s, t, o){
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(badge, x + s - cw/2 - 2.5, y + 2.5 + ch/2 + 0.5);
   }
+  // 兵器小签（左上角）：刀/枪/弓/骑各握各的兵器，兵种差异扫一眼就分清
+  // （右上角留给品阶角标、左下角留给攻击力签、底沿留给血条，四角各管各的）
+  if (kind === 'unit' && WEAPON_OK[t.type]){
+    const ws = Math.round(s*0.30);
+    const wx = x + 4, wy = y + 4;
+    ctx.fillStyle = 'rgba(255,252,244,0.92)';
+    rr(ctx, wx, wy, ws, ws, 5); ctx.fill();
+    ctx.strokeStyle = bd; ctx.lineWidth = 1.2;
+    rr(ctx, wx, wy, ws, ws, 5); ctx.stroke();
+    ctx.save();
+    ctx.translate(wx + ws/2, wy + ws/2);
+    drawWeaponGlyph(t.type, ws*0.42, tc, 0);
+    ctx.restore();
+  }
   // 攻击力小签（兵种差异一眼可见；射程/攻速点开看详情）
   // 压在左下角：上方留出大字的位置，下方留出血条的位置
   if (o.stat){
@@ -3134,6 +3259,19 @@ function drawHeroWide(x, y, w, h, t, o){
   ctx.fillText(t.type[1] || '', x + w*0.75, y + h*0.48);
   // 等级角标（右上角数字，与普通卡同一套）
   drawLevelBadge(x + w - 4, y + 4, Math.max(9, Math.round(h*0.20)), clamp(t.level||1,1,MAX_TIER), tc);
+  // 名将兵器签（左上角）：红缨长枪，金将金杆、紫将紫杆
+  {
+    const ws = Math.round(h*0.26);
+    const wx = x + 6, wy = y + 6;
+    ctx.fillStyle = 'rgba(255,252,244,0.92)';
+    rr(ctx, wx, wy, ws, ws, 5); ctx.fill();
+    ctx.strokeStyle = bd; ctx.lineWidth = 1.2;
+    rr(ctx, wx, wy, ws, ws, 5); ctx.stroke();
+    ctx.save();
+    ctx.translate(wx + ws/2, wy + ws/2);
+    drawWeaponGlyph('qiang', ws*0.42, tc, 0);
+    ctx.restore();
+  }
   // 技能冷却环
   if (o.cd !== undefined){
     const hd = HEROES[t.type];
@@ -3816,7 +3954,10 @@ function drawMarchers(v, foeHalf){
     const edge = mine ? GOLD : SEAL;
     ctx.save();
     ctx.globalAlpha = fade;
-    ctx.translate(e.x + (e.jit || 0), e.y + (e.jit || 0)*0.45);
+    // 出手那一瞬间往敌人方向探身（我方朝上、敌方朝下）
+    const mSwing = (e.swing || 0) > 0 ? Math.sin((1 - e.swing/0.25) * Math.PI) : 0;
+    const lunge = (mine ? -1 : 1) * mSwing * 5;
+    ctx.translate(e.x + (e.jit || 0), e.y + (e.jit || 0)*0.45 + lunge);
     ctx.fillStyle = 'rgba(70,60,45,0.18)';
     ctx.beginPath(); ctx.ellipse(0, s*0.42, s*0.46, s*0.16, 0, 0, Math.PI*2); ctx.fill();
     // 前进方向的小三角：我方朝上，敌方朝下；列队待命时改成虚线圈 + 一个「待」字
@@ -3846,6 +3987,12 @@ function drawMarchers(v, foeHalf){
     ctx.strokeStyle = tier.bd; ctx.lineWidth = 2.4; ctx.stroke();
     ctx.strokeStyle = edge; ctx.lineWidth = 2.2;
     ctx.beginPath(); ctx.arc(0, 0, s*0.5 + 3.2, 0, Math.PI*2); ctx.stroke();
+    // 兵器：每种兵各握一件趁手的（刀弧/长枪/弓/马首），出手时往前探；
+    // 敌兵面朝下，整体转半圈。兵器垫在字下面，兵种字依旧压在最上层。
+    ctx.save();
+    if (!mine) ctx.rotate(Math.PI);
+    drawWeaponGlyph(e.key, s*0.5, tier.c, mSwing);
+    ctx.restore();
     ctx.fillStyle = tier.c;
     ctx.font = Math.round(s*0.58) + 'px ' + FONT;
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -4078,6 +4225,50 @@ function drawFx(v, foeHalf){
       ctx.strokeStyle = f.color || INK; ctx.lineWidth = 10*(1-p) + 2;
       ctx.beginPath(); ctx.arc(f.x, f.y, f.r0 + (f.r1-f.r0)*p, 0, Math.PI*2); ctx.stroke();
       ctx.restore();
+    } else if (f.type === 'slash'){
+      // 横斩弧光：一把刀扫过被击中的单位
+      if (inFoeHalf(f.y) !== foeHalf) continue;
+      ctx.save();
+      ctx.globalAlpha = (1-p) * 0.95;
+      ctx.translate(f.x, f.y);
+      ctx.rotate(-0.9 + p * 1.8);
+      ctx.lineCap = 'round';
+      const R = f.big ? 32 : 20;
+      ctx.strokeStyle = f.color || '#fff3cc';
+      ctx.lineWidth = f.big ? 6 : 4;
+      ctx.beginPath(); ctx.arc(0, 0, R, -Math.PI*0.55, -Math.PI*0.05); ctx.stroke();
+      ctx.strokeStyle = '#fff8e6';
+      ctx.lineWidth = f.big ? 2.2 : 1.5;
+      ctx.beginPath(); ctx.arc(0, 0, R, -Math.PI*0.55, -Math.PI*0.05); ctx.stroke();
+      ctx.restore();
+    } else if (f.type === 'arrow'){
+      // 一支箭沿弹道飞向目标
+      if (inFoeHalf((f.y1 + f.y2) / 2) !== foeHalf) continue;
+      ctx.save();
+      ctx.globalAlpha = (1-p) * 0.95;
+      ctx.translate(f.x1 + (f.x2 - f.x1)*p, f.y1 + (f.y2 - f.y1)*p);
+      ctx.rotate(Math.atan2(f.y2 - f.y1, f.x2 - f.x1));
+      ctx.strokeStyle = '#8a5a2a'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-13, 0); ctx.lineTo(3, 0); ctx.stroke();
+      ctx.fillStyle = '#6b4a22';
+      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(1, -3.4); ctx.lineTo(1, 3.4); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#d8d2c2'; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(-13, -3); ctx.lineTo(-9.5, 0); ctx.lineTo(-13, 3); ctx.stroke();
+      ctx.restore();
+    } else if (f.type === 'dust'){
+      // 蹄尘：骑兵出手时脚下扬起一圈土
+      if (inFoeHalf(f.y) !== foeHalf) continue;
+      ctx.save();
+      ctx.globalAlpha = (1-p) * 0.55;
+      ctx.fillStyle = 'rgba(140,120,90,0.9)';
+      for (let k = 0; k < 5; k++){
+        const aa = (k / 5) * Math.PI * 2 + p * 2.2;
+        ctx.beginPath();
+        ctx.arc(f.x + Math.cos(aa) * (10 + p*24), f.y + Math.sin(aa) * (6 + p*15),
+                2.6 * (1-p) + 1, 0, Math.PI*2);
+        ctx.fill();
+      }
+      ctx.restore();
     }
   }
   for (const p of G.parts){
@@ -4092,9 +4283,20 @@ function drawFx(v, foeHalf){
     if (inFoeHalf(f.y) !== foeHalf) continue;
     const a = 1 - f.t/f.dur;
     ctx.globalAlpha = a;
-    ctx.fillStyle = f.color;
-    ctx.font = 'bold 17px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(f.text, f.x, f.y);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    if (f.dmg){
+      // 伤害数字：白描边红字，压在什么底色上都读得清
+      ctx.font = 'bold 15px ' + FONT;
+      ctx.lineWidth = 3; ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'rgba(255,250,240,0.92)';
+      ctx.strokeText(f.text, f.x, f.y);
+      ctx.fillStyle = f.color;
+      ctx.fillText(f.text, f.x, f.y);
+    } else {
+      ctx.font = 'bold 17px ' + FONT;
+      ctx.fillStyle = f.color;
+      ctx.fillText(f.text, f.x, f.y);
+    }
   }
   ctx.globalAlpha = 1;
 }
