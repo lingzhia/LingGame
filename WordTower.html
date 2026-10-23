@@ -2028,7 +2028,11 @@ function attackFx(type, ax, ay, bx, by, color){
   if (type === 'dao'){
     G.fx.push({ type:'slash', x:bx, y:by, t:0, dur:0.20, color:color });
   } else if (type === 'gong'){
-    G.fx.push({ type:'arrow', x1:ax, y1:ay, x2:bx, y2:by, t:0, dur:0.16, color:color });
+    // 箭要真的飞一段：按距离给飞行时长（460px/s，0.24~0.62s），从手边起飞
+    const d = Math.hypot(bx-ax, by-ay) || 1;
+    const k = Math.min(14, d*0.18) / d;
+    G.fx.push({ type:'arrow', x1:ax+(bx-ax)*k, y1:ay+(by-ay)*k, x2:bx, y2:by,
+                t:0, dur:clamp(d/460, 0.24, 0.62), color:color });
   } else if (type === 'qi'){
     G.fx.push({ type:'dust', x:ax, y:ay, t:0, dur:0.32, color:color });
   } else if (type === 'hero'){
@@ -2103,6 +2107,80 @@ function drawWeaponGlyph(type, r, color, swing){
     ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.moveTo(-r*0.16, -r*0.30); ctx.lineTo(-r*0.34, -r*0.10); ctx.stroke();
   }
+}
+
+/* 骑兵的坐骑：比骑手更宽的一匹棕马 —— 头颈前伸、四蹄迈步、鬃尾齐全 */
+function drawHorse(s, ph){
+  const st = Math.sin(ph) * s*0.13;
+  ctx.strokeStyle = '#57402a'; ctx.lineWidth = Math.max(2, s*0.09); ctx.lineCap = 'round';
+  for (const [lx, ly, sw] of [[-0.44,-0.30,1],[0.44,-0.30,1],[-0.44,0.36,-1],[0.44,0.36,-1]]){
+    ctx.beginPath();
+    ctx.moveTo(lx*s, ly*s); ctx.lineTo(lx*s + sw*st, ly*s - s*0.32);
+    ctx.stroke();
+  }
+  ctx.fillStyle = '#6b4a2f';
+  // 身体（比骑手的身子宽，从两侧露出来）
+  ctx.beginPath(); ctx.ellipse(0, s*0.04, s*0.58, s*0.50, 0, 0, Math.PI*2); ctx.fill();
+  // 头颈（朝前 -y）
+  ctx.beginPath();
+  ctx.moveTo(-s*0.24, -s*0.10);
+  ctx.quadraticCurveTo(-s*0.36, -s*0.62, -s*0.10, -s*0.92);
+  ctx.quadraticCurveTo(s*0.06, -s*1.00, s*0.10, -s*0.82);
+  ctx.quadraticCurveTo(s*0.02, -s*0.52, s*0.20, -s*0.06);
+  ctx.closePath(); ctx.fill();
+  // 鬃毛 + 尾巴
+  ctx.strokeStyle = '#4a3421'; ctx.lineWidth = Math.max(1.5, s*0.06);
+  ctx.beginPath(); ctx.moveTo(-s*0.20, -s*0.30); ctx.quadraticCurveTo(-s*0.28, -s*0.62, -s*0.12, -s*0.86); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, s*0.50); ctx.quadraticCurveTo(s*0.18, s*0.70, s*0.04, s*0.86); ctx.stroke();
+}
+
+/* 文字小人：字是脑袋、身子穿品阶色的小袍 ——
+   两条腿走路迈步、后手扶在身侧、前手以肩为轴握兵器，出手从后仰抡到前劈。
+   mounted=骑兵：跨坐马背不画腿，人在马背上抬高半骑位。 */
+function drawPerson(s, tier, key, ph, mSwing, mounted, bodyC){
+  ctx.save();
+  if (mounted) ctx.translate(0, -s*0.22);
+  const stride = Math.sin(ph) * s*0.13;
+  // 腿
+  if (!mounted){
+    ctx.strokeStyle = tier.bd; ctx.lineWidth = Math.max(2, s*0.10); ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(-s*0.13, s*0.38); ctx.lineTo(-s*0.16 - stride, s*0.78);
+    ctx.moveTo( s*0.13, s*0.38); ctx.lineTo( s*0.16 + stride, s*0.78);
+    ctx.stroke();
+  }
+  // 后手：扶在身侧的小胳膊
+  ctx.strokeStyle = tier.c; ctx.lineWidth = Math.max(1.6, s*0.075);
+  ctx.beginPath(); ctx.moveTo(-s*0.20, s*0.04); ctx.lineTo(-s*0.34, s*0.30); ctx.stroke();
+  // 躯干：一件小袍子 + 腰带
+  ctx.fillStyle = bodyC;
+  ctx.beginPath();
+  ctx.moveTo(-s*0.16, -s*0.10);
+  ctx.quadraticCurveTo(-s*0.30, s*0.12, -s*0.20, s*0.44);
+  ctx.lineTo(s*0.20, s*0.44);
+  ctx.quadraticCurveTo(s*0.30, s*0.12, s*0.16, -s*0.10);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = tier.bd; ctx.lineWidth = 1.8; ctx.stroke();
+  ctx.strokeStyle = tier.bd; ctx.lineWidth = Math.max(1.2, s*0.05);
+  ctx.beginPath(); ctx.moveTo(-s*0.22, s*0.16); ctx.lineTo(s*0.22, s*0.16); ctx.stroke();
+  // 头（兵种字由外面画上去，保持正立）
+  ctx.fillStyle = bodyC;
+  ctx.beginPath(); ctx.arc(0, -s*0.36, s*0.28, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = tier.bd; ctx.lineWidth = 1.8; ctx.stroke();
+  // 前手 + 兵器：出手那一下从后仰抡到前劈（弓只微拉、枪只突刺）
+  // 骑兵已经骑在马上，手里的兵器换成军刀，不再举马首图标
+  const wkey = mounted ? 'dao' : key;
+  const armBase = key === 'gong' ? -0.18 : (key === 'qiang' ? -0.28 : -0.95);
+  const armSwing = key === 'gong' ? 0.10 : (key === 'qiang' ? 0.34 : 1.50);
+  ctx.save();
+  ctx.translate(s*0.18, s*0.02);
+  ctx.rotate(armBase + mSwing*armSwing);
+  ctx.strokeStyle = tier.c; ctx.lineWidth = Math.max(1.8, s*0.08);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -s*0.24); ctx.stroke();
+  ctx.translate(0, -s*0.24);
+  drawWeaponGlyph(wkey, s*0.55, tier.c, 0);
+  ctx.restore();
+  ctx.restore();
 }
 
 
@@ -3203,7 +3281,7 @@ function drawCard(x, y, s, t, o){
     rr(ctx, wx, wy, ws, ws, 5); ctx.stroke();
     ctx.save();
     ctx.translate(wx + ws/2, wy + ws/2);
-    drawWeaponGlyph(t.type, ws*0.42, tc, 0);
+    drawWeaponGlyph(t.type, ws*0.42, tc, t.swing > 0 ? Math.sin((1 - t.swing/0.26) * Math.PI) : 0);
     ctx.restore();
   }
   // 攻击力小签（兵种差异一眼可见；射程/攻速点开看详情）
@@ -3269,7 +3347,7 @@ function drawHeroWide(x, y, w, h, t, o){
     rr(ctx, wx, wy, ws, ws, 5); ctx.stroke();
     ctx.save();
     ctx.translate(wx + ws/2, wy + ws/2);
-    drawWeaponGlyph('qiang', ws*0.42, tc, 0);
+    drawWeaponGlyph('qiang', ws*0.42, tc, t.swing > 0 ? Math.sin((1 - t.swing/0.26) * Math.PI) : 0);
     ctx.restore();
   }
   // 技能冷却环
@@ -3958,76 +4036,68 @@ function drawMarchers(v, foeHalf){
     const mSwing = (e.swing || 0) > 0 ? Math.sin((1 - e.swing/0.25) * Math.PI) : 0;
     const lunge = (mine ? -1 : 1) * mSwing * 5;
     ctx.translate(e.x + (e.jit || 0), e.y + (e.jit || 0)*0.45 + lunge);
+    const hd = mine ? 1 : -1;              // 屏幕朝向：我方面朝上，敌方面朝下
     ctx.fillStyle = 'rgba(70,60,45,0.18)';
-    ctx.beginPath(); ctx.ellipse(0, s*0.42, s*0.46, s*0.16, 0, 0, Math.PI*2); ctx.fill();
-    // 前进方向的小三角：我方朝上，敌方朝下；列队待命时改成虚线圈 + 一个「待」字
+    ctx.beginPath(); ctx.ellipse(0, hd*s*0.92, s*0.52, s*0.15, 0, 0, Math.PI*2); ctx.fill();
+    // 脚下一椭圆阵营色托底：敌我一眼分（金/朱）
+    const tier = TIER[clamp(e.level || 1, 1, MAX_TIER)];
+    const bodyC = e.hurt > 0.35 ? tier.bd : tier.bg;
+    ctx.fillStyle = edge; ctx.globalAlpha = fade*0.30;
+    ctx.beginPath(); ctx.ellipse(0, hd*s*0.88, s*0.50, s*0.14, 0, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = fade;
+    // 文字小人：字当脑袋、袍子按品阶上色；敌兵整体竖直翻转（字在翻转外画，永远正立）
+    ctx.save();
+    ctx.scale(1, hd);
+    if (e.key === 'qi') drawHorse(s, e.queued ? 0 : (e.born||0)*11);
+    drawPerson(s, tier, e.key, e.queued ? 0 : (e.born||0)*11, mSwing, e.key === 'qi', bodyC);
+    ctx.restore();
+    // 脸：兵种字画在脑袋上（不随翻转，正立可读）
+    ctx.fillStyle = tier.c;
+    ctx.font = 'bold ' + Math.round(s*0.30) + 'px ' + FONT;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(e.char, 0, hd * -(e.key === 'qi' ? 0.58 : 0.36) * s);
+    // 列队待命：虚线圈 + 「待」字压在脚下
     if (e.queued){
       ctx.strokeStyle = edge; ctx.globalAlpha = fade*0.55;
       ctx.setLineDash([4,4]); ctx.lineWidth = 1.6;
-      ctx.beginPath(); ctx.arc(0, 0, s*0.62, 0, Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, 0, s*0.85, 0, Math.PI*2); ctx.stroke();
       ctx.setLineDash([]);
       ctx.globalAlpha = fade*0.8; ctx.fillStyle = edge;
-      ctx.font = Math.round(s*0.32) + 'px ' + FONT;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.fillText('待', 0, s*0.74);
-      ctx.globalAlpha = fade;
-    } else {
-      ctx.fillStyle = edge; ctx.globalAlpha = fade*0.5;
-      const ay = mine ? -s*0.66 : s*0.66;
-      ctx.beginPath();
-      ctx.moveTo(0, ay + (mine ? -6 : 6)); ctx.lineTo(-4.5, ay); ctx.lineTo(4.5, ay);
-      ctx.closePath(); ctx.fill();
+      ctx.font = Math.round(s*0.30) + 'px ' + FONT;
+      ctx.fillText('待', 0, hd*s*1.08);
       ctx.globalAlpha = fade;
     }
-    // 盘面按「品阶」上色（和棋盘上的守军、手牌同一套），
-    // 外面再套一圈阵营色 —— 一眼既分敌我又分几阶。
-    const tier = TIER[clamp(e.level || 1, 1, MAX_TIER)];
-    ctx.fillStyle = e.hurt > 0.35 ? tier.bd : tier.bg;
-    ctx.beginPath(); ctx.arc(0, 0, s*0.5, 0, Math.PI*2); ctx.fill();
-    ctx.strokeStyle = tier.bd; ctx.lineWidth = 2.4; ctx.stroke();
-    ctx.strokeStyle = edge; ctx.lineWidth = 2.2;
-    ctx.beginPath(); ctx.arc(0, 0, s*0.5 + 3.2, 0, Math.PI*2); ctx.stroke();
-    // 兵器：每种兵各握一件趁手的（刀弧/长枪/弓/马首），出手时往前探；
-    // 敌兵面朝下，整体转半圈。兵器垫在字下面，兵种字依旧压在最上层。
-    ctx.save();
-    if (!mine) ctx.rotate(Math.PI);
-    drawWeaponGlyph(e.key, s*0.5, tier.c, mSwing);
-    ctx.restore();
-    ctx.fillStyle = tier.c;
-    ctx.font = Math.round(s*0.58) + 'px ' + FONT;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillText(e.char, 0, 1);
     // 品阶数字：四个兵种长得一样，几阶全靠这个角标
     if (e.level > 1){
-      const bs = Math.round(s*0.30);
+      const bs = Math.round(s*0.28);
       ctx.fillStyle = edge;
-      rr(ctx, s*0.10, -s*0.54, bs, bs, 3); ctx.fill();
+      rr(ctx, s*0.42, -s*0.92, bs, bs, 3); ctx.fill();
       ctx.fillStyle = '#fffaf0';
       ctx.font = 'bold ' + Math.round(bs*0.78) + 'px ' + FONT;
-      ctx.fillText(String(e.level), s*0.10 + bs/2, -s*0.54 + bs/2 + 0.5);
+      ctx.fillText(String(e.level), s*0.42 + bs/2, -s*0.92 + bs/2 + 0.5);
     }
     if (e.elite > 0){
-      const bs = Math.round(s*0.30);
+      const bs = Math.round(s*0.28);
       ctx.fillStyle = '#1c4f8c';
-      rr(ctx, s*0.90 - bs, -s*0.54, bs, bs, 3); ctx.fill();
+      rr(ctx, s*0.72, -s*0.92, bs, bs, 3); ctx.fill();
       ctx.fillStyle = '#fffaf0';
       ctx.font = 'bold ' + Math.round(bs*0.72) + 'px ' + FONT;
-      ctx.fillText('+' + e.elite, s*0.90 - bs/2, -s*0.54 + bs/2 + 0.5);
+      ctx.fillText('+' + e.elite, s*0.72 + bs/2, -s*0.92 + bs/2 + 0.5);
     }
     if (e.stun > 0){
       ctx.strokeStyle = '#c79a26'; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.arc(0, -s*0.72, 4, 0, Math.PI*2); ctx.stroke();
+      ctx.beginPath(); ctx.arc(0, -s*1.32, 4, 0, Math.PI*2); ctx.stroke();
     }
     if (e.slowT > 0){
       ctx.fillStyle = 'rgba(42,95,168,0.20)';
-      ctx.beginPath(); ctx.arc(0, 0, s*0.62, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(0, 0, s*0.62, s*1.05, 0, 0, Math.PI*2); ctx.fill();
     }
     if (e.hp < e.maxHp){
       const w = s, p = clamp(e.hp/e.maxHp,0,1);
       ctx.fillStyle = 'rgba(60,50,40,0.25)';
-      rr(ctx, -w/2, -s*0.5 - 9, w, 4, 2); ctx.fill();
+      rr(ctx, -w/2, -s*1.18, w, 4, 2); ctx.fill();
       ctx.fillStyle = edge;
-      rr(ctx, -w/2, -s*0.5 - 9, w*p, 4, 2); ctx.fill();
+      rr(ctx, -w/2, -s*1.18, w*p, 4, 2); ctx.fill();
     }
     ctx.restore();
   }
@@ -4242,18 +4312,26 @@ function drawFx(v, foeHalf){
       ctx.beginPath(); ctx.arc(0, 0, R, -Math.PI*0.55, -Math.PI*0.05); ctx.stroke();
       ctx.restore();
     } else if (f.type === 'arrow'){
-      // 一支箭沿弹道飞向目标
+      // 一支箭沿抛物弹道飞向目标：尾迹在前、箭身在飞、落点前不淡出
       if (inFoeHalf((f.y1 + f.y2) / 2) !== foeHalf) continue;
+      const dx = f.x2 - f.x1, dy = f.y2 - f.y1;
+      const arc = Math.hypot(dx, dy) * 0.10;              // 弓的抛物线拱高
+      const pos = q => [ f.x1 + dx*q, f.y1 + dy*q - Math.sin(q*Math.PI)*arc ];
+      const [cx2, cy2] = pos(clamp(p, 0, 1));
+      const [nx2, ny2] = pos(clamp(p + 0.035, 0, 1));     // 前瞻一点求朝向
       ctx.save();
-      ctx.globalAlpha = (1-p) * 0.95;
-      ctx.translate(f.x1 + (f.x2 - f.x1)*p, f.y1 + (f.y2 - f.y1)*p);
-      ctx.rotate(Math.atan2(f.y2 - f.y1, f.x2 - f.x1));
-      ctx.strokeStyle = '#8a5a2a'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
-      ctx.beginPath(); ctx.moveTo(-13, 0); ctx.lineTo(3, 0); ctx.stroke();
-      ctx.fillStyle = '#6b4a22';
-      ctx.beginPath(); ctx.moveTo(8, 0); ctx.lineTo(1, -3.4); ctx.lineTo(1, 3.4); ctx.closePath(); ctx.fill();
-      ctx.strokeStyle = '#d8d2c2'; ctx.lineWidth = 1.4;
-      ctx.beginPath(); ctx.moveTo(-13, -3); ctx.lineTo(-9.5, 0); ctx.lineTo(-13, 3); ctx.stroke();
+      ctx.globalAlpha = clamp((1-p) * 3.2, 0, 1) * 0.95;  // 只在落地前一瞬淡出
+      ctx.translate(cx2, cy2);
+      ctx.rotate(Math.atan2(ny2 - cy2, nx2 - cx2));
+      // 尾迹
+      ctx.strokeStyle = 'rgba(138,90,42,0.45)'; ctx.lineWidth = 2.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(-38, 0); ctx.lineTo(-14, 0); ctx.stroke();
+      ctx.strokeStyle = '#7c4e22'; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(-14, 0); ctx.lineTo(4, 0); ctx.stroke();
+      ctx.fillStyle = '#5f3c1a';
+      ctx.beginPath(); ctx.moveTo(11, 0); ctx.lineTo(1, -4.4); ctx.lineTo(1, 4.4); ctx.closePath(); ctx.fill();
+      ctx.strokeStyle = '#efe9da'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(-14, -4); ctx.lineTo(-9, 0); ctx.lineTo(-14, 4); ctx.stroke();
       ctx.restore();
     } else if (f.type === 'dust'){
       // 蹄尘：骑兵出手时脚下扬起一圈土
