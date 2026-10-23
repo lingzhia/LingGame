@@ -1869,9 +1869,10 @@ function updateMarchers(dt){
     //    对撞、挨打照常 —— 站在路上就是一道人墙。
     if (m.queued) continue;
 
-    // 5) 出征行军：匀速赶路。两军纵队在同一条路上迎面推进，
-    //    在火力对等的地方顶成战线 —— 守军火力、克制、升级把战线往对面推。
-    const adv = far ? sp * ATK_MOVE_MUL : sp;
+    // 5) 出征行军：自家半场 2 倍行军（主场熟门熟路），过缝踏上敌方路恢复常速。
+    //    两军纵队在同一条路上迎面推进，在火力对等的地方顶成战线 ——
+    //    守军火力、克制、升级把战线往对面推。
+    const adv = (far ? sp * ATK_MOVE_MUL : sp) * (m.ri < m.crossRi ? 2 : 1);
 
     if (marchForward(m, adv * dt)){
       G.marchers.splice(i,1);
