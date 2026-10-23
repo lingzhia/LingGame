@@ -510,15 +510,13 @@ for (const n in HEROES){
 const HERO_CHARS = Object.keys(CHAR_HERO);   // 全部单字（去重后 14 个），只用于文案/调试；发牌走字池
 
 /* ---------------- 武将文字池 ----------------
-   一局只发一次：把 12 个名将的名字全部拆成单字，洗成一池（24 张），
-   发一张就少一张，本局不再回池。
+   整局只有一套卡：把 12 个名将的名字全部拆成单字，洗成一池（24 张）。
    同一个字在池里有几张，取决于有几个名将的名字用到它 ——
    「关」×3（关羽/关兴/关平）、「张」×3（张飞/张苞/张翼）、「黄」×3（黄忠/黄祖/黄盖），
    其余各 ×1。
-   所以「羽」在一池里只有一张：一轮里最多只能召出一个关羽。
-   一轮摸空后自动重洗 —— 但重洗不是洗回完整的 24 张：
-   双方场上已经有的字（守军单字、名将名字里的字）不回池，
-   场上站着的武将，对面就再也拼不出第二个同名将 —— 靠字池硬约束，不靠落子判定。
+   所以「羽」全池只有一张：同一时刻最多只能召出一个关羽。
+   摸空不重洗 —— 字离开战场就回池（阵亡 / 遣散 / 被顶掉 / 征兵回收 / 上路换兵），
+   场上站着的武将，对面就拼不出第二个同名将 —— 靠摸牌时的实时过滤，不靠落子判定。
    双方共用同一个池，谁摸到算谁的。 */
 const HERO_CHAR_POOL0 = [];
 for (const n in HEROES) HERO_CHAR_POOL0.push(HEROES[n].a, HEROES[n].b);
@@ -552,28 +550,24 @@ function fieldCharSet(){
   }
   return used;
 }
-/* 一轮摸空 -> 重洗：完整 24 张去掉双方场上的字再洗入。
-   极端情况全字都在场上时退回全量（总得有牌可发），返回 true 表示这次是重洗后才发的牌 */
-function refillPool(){
-  const used = fieldCharSet();
-  const left = HERO_CHAR_POOL0.filter(c => !used[c]);
-  G.charPool = shuffleInPlace(left.length ? left : HERO_CHAR_POOL0.slice());
-  G.poolRound = (G.poolRound || 1) + 1;
-  return true;
+/* 一轮摸空 -> 没有了。整局只有一套卡（24 字，含同姓的重复字：关x3 张x3 黄x3），不再重洗。
+   字离开战场（阵亡 / 遣散 / 被顶掉 / 征兵回收 / 上路换兵）就按份回池，见 returnTileChars。 */
+function returnChar(c){
+  if (!c) return;
+  (G.charPool || (G.charPool = [])).push(c);
+}
+function returnTileChars(t){
+  if (!t) return;
+  if (t.kind === 'char') returnChar(t.char);
+  else if (t.kind === 'hero' && HEROES[t.type]){ returnChar(HEROES[t.type].a); returnChar(HEROES[t.type].b); }
 }
 function drawPoolChar(preferGold){
-  let pool = G.charPool || (G.charPool = []);
-  if (!pool.length){ refillPool(); pool = G.charPool; }
-  /* 场上的字实时排除：名将活着，他的字就摸不出来（重洗只是兜底，
-     光靠重洗不够 —— 池子没摸空时那两个字照样会被抽到）。 */
+  const pool = G.charPool || (G.charPool = []);
+  /* 场上的字实时排除（兜底）：名将活着，他的字就摸不出来。 */
   const used = fieldCharSet();
-  let avail = pool.filter(c => !used[c]);
-  if (!avail.length){
-    refillPool(); pool = G.charPool;               // 池里只剩场上的字了：重洗换血
-    avail = pool.filter(c => !used[c]);
-    if (!avail.length) avail = pool;               // 全字都在场上：退回全量保证有牌可发
-  }
-  let idx = -1;
+  const avail = pool.filter(c => !used[c]);
+  if (!avail.length) return null;                // 池子真的空了：这一手改发兵
+  let idx = (gRnd() * avail.length) | 0;
   if (preferGold){
     const g = [];
     for (let i = 0; i < avail.length; i++) if (GOLD_CHARS.indexOf(avail[i]) >= 0) g.push(i);
@@ -865,7 +859,6 @@ function newGame(seed){
     aiBondOn:{}, aiShield:0,
     aiUnlocked:{},          // 电脑自己开垦出来的格子
     prepT:0, aiT:0,
-    poolRound:1,            // 字池第几轮（摸空一次 +1）
   };
   // 每局重掷一张地图（两边共用一张，上下镜像），再按这张图发熟地
   genMap(gs);
@@ -974,10 +967,6 @@ function rollTile(){
    手里已经攥着半个名字时，优先补它的另一半（手感上「快凑齐了」），
    但另一半如果早被别人摸走了，就只能摸别的 —— 池子是硬约束。 */
 function pickHeroChar(){
-  if (!G.charPool || !G.charPool.length){
-    refillPool();
-    toast('字池摸空 · 重洗（场上的字不回池）');
-  }
   const held = [];
   for (const t of G.hand) if (t && t.kind==='char') held.push(t.char);
   for (const u of G.board) if (u && u.kind==='char') held.push(u.char);
@@ -1015,6 +1004,7 @@ function recycleCell(idx){
   if (!u) return 0;
   const v = recycleValue(u);
   clearCells(G.board, idx);
+  returnTileChars(u);                          // 遣散：字回池
   refreshBonds();
   G.mantou += v;
   return v;
@@ -1088,7 +1078,7 @@ function sendTileToRoad(owner, tile){
   if (!tile) return null;
   let key = null, lv = 1;
   if (tile.kind === 'unit'){ key = tile.type; lv = tile.level || 1; }
-  else if (tile.kind === 'char'){ key = pick(BASE_KEYS); lv = 1; }
+  else if (tile.kind === 'char'){ key = pick(BASE_KEYS); lv = 1; }   // 字换兵上路（字回池由 enlistSide 负责）
   else return null;
   const mine = owner !== 'ai';
   const cell = pickQueueCell(mine, null);          // 兵营来的：主公前方 1 格起往后排
@@ -1133,8 +1123,11 @@ function enlistSide(mine){
     const t = hand[i];
     if (!t) continue;
     hand[i] = null;
-    if (plan[i] === 1 && sendTileToRoad(mine ? 'me' : 'ai', t)) sent++;
-    else folded += recycleValue(t);          // 路挤满了 / 本来上不了路
+    if (plan[i] === 1 && sendTileToRoad(mine ? 'me' : 'ai', t)){
+      sent++;
+      if (t.kind === 'char') returnChar(t.char);   // 字换兵上路：字离开战场，回池
+    }
+    else { returnTileChars(t); folded += recycleValue(t); }   // 路挤满了 / 本来上不了路：字回池，牌折馒头
   }
 
   addMoney(mine, -cost + folded);
@@ -1908,6 +1901,7 @@ function killDefender(mine, idx){
   if (!u) return;
   const p = unitPos(u, S.baseY);
   clearCells(S.board, idx);
+  returnTileChars(u);                          // 字 / 名将阵亡：字离开战场，回池
   burst(p.x, p.y, 16, S.color);
   if (mine){ G.lostUnits = (G.lostUnits || 0) + 1; refreshBonds(); }
   else refreshAiBonds();
@@ -2349,7 +2343,6 @@ function partnerOf(c){
   return out.length ? pick(out) : null;
 }
 function pickHeroCharAI(){
-  if (!G.charPool || !G.charPool.length) refillPool();   // 电脑摸空也重洗（池子共用，不打扰玩家提示）
   const held = [];
   for (const t of G.ai.hand) if (t && t.kind === 'char') held.push(t.char);
   for (const u of G.enBoard) if (u && u.kind === 'char') held.push(u.char);
@@ -2618,6 +2611,7 @@ function aiPlace(mine){
     if (!done && t.kind === 'unit'){
       const j = aiJunkCharCell(mine);
       if (j >= 0){
+        returnTileChars(board[j]);              // 被顶掉的孤字：回池
         clearCells(board, j);
         const nu = toUnitObject(t, j);
         if (nu){ nu.born = 0; board[j] = nu; hand[hi] = null; placed++; done = true; }
@@ -2727,6 +2721,7 @@ function aiRaiseCash(mine, need){
     const u = board[pickIdx];
     const gain = recycleValue(u);
     const p = unitPos(u, baseY);
+    returnTileChars(u);                         // 遣散：字回池
     clearCells(board, pickIdx);
     addMoney(mine, gain);
     if (mine) refreshBonds(); else refreshAiBonds();
@@ -6604,7 +6599,7 @@ window.__api = {
   setPaused, togglePause, pauseAction, canPause, BTN_PAUSE, BTN_AUTO,
   setAutopilot, get AUTOPILOT(){ return AUTOPILOT; }, aiThink, botShopStep, sideBoard, sideHand, landOKOf,
   aiTick, aiEnlist, aiPlace, sendAttack, pickHeroChar, pickHeroCharAI, rollTile, aiRollTile, sendCharToRoad, sendTileToRoad, freeRoadSlots, enlistSide, moneyOf, addMoney,
-  HERO_CHAR_POOL0, drawPoolChar, takePoolChar, refillPool,
+  HERO_CHAR_POOL0, drawPoolChar, takePoolChar, returnChar, returnTileChars,
   addHeroXp, heroXpNeed, heroMaxLv, heroXpGain, releaseQueue, dealFrom, HERO_XP,
   ownPathSpeedMul, queueRank, headRemain, routeRemainTo, OWN_PATH_SPD_CAP, OWN_PATH_SPD_BASE,
   partnersOf, aiCharSpot, aiJunkCharCell, aiEmptyLand, aiCharCount, aiCharWorth,
