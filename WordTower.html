@@ -2214,9 +2214,12 @@ function aiShop(mine){
   mine = !!mine;
   const pool = SHOP_POOL.slice(), stock = [];
   for (let i=0;i<3 && pool.length;i++) stock.push(pool.splice((gRnd()*pool.length)|0,1)[0]);
+  const owned = mine ? G.passive : G.ai.passive;
   for (const id of stock){
     const it = ITEMS[id];
     if (moneyOf(mine) < it.cost) continue;
+    // 已经有的被动再买一次 = 白扔馒头（实测占电脑商店开销的 29%）
+    if (it.type === 'passive' && owned[id]) continue;
     if (it.type === 'active' && (mine ? G.actives : G.ai.actives).length >= 2) continue;
     addMoney(mine, -it.cost);
     if (it.type === 'active') (mine ? G.actives : G.ai.actives).push(id);
@@ -2438,6 +2441,10 @@ function aiPlace(mine){
       const cell = pathCells[Math.min(2, pathCells.length - 1)];
       if (cell !== undefined && spawnRaider(who, cell, t.type, t.level)){
         hand[hi] = null; placed++; done = true;
+        // 上路是静默的，玩家会以为这边从不派兵 —— 给个和开垦同款的反馈
+        const p = roadCellPos(cell, mine);
+        burst(p.x, p.y, 10, SEAL);
+        toast(tag + '派兵上路 · 路上 ' + aiRaiderCount(mine) + ' 兵待命');
       }
     }
     // 2c) 熟地占满了：普通兵可以顶掉盘上一个「孤字」（另一半不在场，纯占坑的死字）。
@@ -2610,7 +2617,11 @@ function aiFlushHand(mine){
     if (freeRoadSlots(who) <= 0) return;
     const cell = pathCells[Math.min(2, pathCells.length - 1)];
     if (cell === undefined) return;
-    if (spawnRaider(who, cell, t.type, t.level)) hand[i] = null;
+    if (spawnRaider(who, cell, t.type, t.level)){
+      hand[i] = null;
+      const p = roadCellPos(cell, mine);
+      burst(p.x, p.y, 8, SEAL);
+    }
   }
 }
 /* ============================================================
