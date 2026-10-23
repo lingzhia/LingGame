@@ -2303,7 +2303,12 @@ function aiPlace(){
         const sc = cellScore(i, false);
         if (sc > bs){ bs = sc; best = i; }
       }
-      if (best >= 0){ G.aiUnlocked[best] = true; G.ai.hand.splice(hi, 1); }
+      if (best >= 0){
+        G.aiUnlocked[best] = true; G.ai.hand.splice(hi, 1);
+        // 与玩家开垦同款反馈（金光 + 提示）：不然电脑默默挖地，玩家以为它不会用铲子
+        burst(cellCX(colOf(best)), cellCY(colOf(best), rowOf(best), Y_ENEMY), 12, GRASS);
+        toast('敌方开垦荒地 · 已开 ' + (START_OPEN + Object.keys(G.aiUnlocked).length) + ' 格');
+      }
       continue;
     }
     // 1) 叠到同种的守军身上 -> 升阶（等级可差 1 阶）
@@ -2820,7 +2825,7 @@ function drawBoardBase(baseY, board, isEnemy){
         }
         continue;                                    // 路已经在底层铺好了
       }
-      // 荒地：玩家要用铲子挖，电脑没有铲子就一律用不了
+      // 荒地：两边都要用铲子挖开才能布防（电脑和自己同一条规则）
       const locked = mine ? !G.unlocked[idx] : !aiLandOK(idx);
       // 开局 7 格熟地、其余是荒地 —— 每格都画个小铲子会糊成一片，
       // 所以只在「手里正拖着铲子」的时候才把可开垦的格子点亮，平时只留一层淡绿。
