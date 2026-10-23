@@ -1879,13 +1879,16 @@ function updateMarchers(dt){
     const ghost = NET.pvp && m.owner === 'me';
 
     // 2) 路上有守军顶着脸 -> 原地厮杀（拦停靠的是「路上的兵」，路外的兵不挡路）
+    //    前提是已经踏上对方场地（过缝）：没过缝的兵不索敌守军，
+    //    否则自家半场 / 跨缝途中就隔着中线开打，防守方等于被先手白打。
     const defMine = m.owner === 'ai';        // 我要打的是对面那块棋盘上的守军
-    const held = ghost ? null : nearestDefender(defMine, m.x, m.y, BLOCK_R, true);
+    const crossed = m.ri >= m.crossRi;       // 过了中缝 = 踏上敌方路
+    const held = (ghost || !crossed) ? null : nearestDefender(defMine, m.x, m.y, BLOCK_R, true);
     if (held){ strikeDefender(m, held); if (!charging) continue; }   // 冲锋：打了照走
 
     // 3) 射程内任何守军（含路外后方阵地）-> 边打边挪，打得起来就走得慢。
     //    进攻单位同样能伤害防守单位 —— 拦停只归路上的守军（见 2），火力面前人人平等。
-    const far = ghost ? null : nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD);
+    const far = (ghost || !crossed) ? null : nearestDefender(defMine, m.x, m.y, m.range + RANGE_PAD);
     if (far) strikeDefender(m, far);
 
     // 4) 待命兵：站在上路的原地不动（在主公前方编入纵队），开战统一放行。
