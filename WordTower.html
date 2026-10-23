@@ -4,6 +4,7 @@
 <meta charset="utf-8" data-page-node-id="jZ1UMOsADKe1jAxmKSiH7X">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover" data-page-node-id="fC4ShShd8tHCSDHGoLISZd">
 <title>WordTower · 文字塔防</title>
+<link rel="icon" href="data:,">
 <style>
   /* 画布是 720×1446 的竖幅，宽屏下左右必然留白。
      留白不用纯黑，改成和画面同系的纸色，整幅画读起来像摊在案上的一卷绢 ——
@@ -5756,7 +5757,7 @@ let LS_OK = HAS_LS;
 const REC_MEM = [];                        // 会话内存储（localStorage 不可用时的兜底）
 const REC = { on:false, seed:0, aiLevel:0, events:[], start:0 };
 let LAST_REC = null;                       // 刚结束的那一局（结算页「回放本局」用）
-const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null, back:'over' };
+const REPLAY = { on:false, ev:[], i:0, speed:2, limit:0, rec:null, dispatching:false, exitBtn:null, back:'over', prevG:null };
 let IN_HOOK = null;                        // 回放时把录好的坐标直接喂进输入层
 
 function recBegin(){
@@ -5877,6 +5878,9 @@ function startReplay(rec, back){
   REPLAY.back = back || 'over';
   REPLAY.rec = rec; REPLAY.ev = recUpgrade(rec.events); REPLAY.i = 0;
   REPLAY.speed = 2; REPLAY.dispatching = false;
+  /* 从结算页点进来的：先把那一局的终局状态收好。
+     回放会 newGame 覆盖 G，退出时得把结算画面原样还回去，而不是甩给玩家一个空的新局。 */
+  REPLAY.prevG = (REPLAY.back === 'over' && G.phase === 'over') ? G : null;   // 只收「结算画面」
   const lastTick = REPLAY.ev.length ? REPLAY.ev[REPLAY.ev.length - 1][0] : 0;
   REPLAY.limit = lastTick + 60 * 120;      // 保险：最多再跑 2 分钟
   try {
@@ -5921,9 +5925,18 @@ function stopReplay(finished){
   G.paused = false;
   const back = REPLAY.back || 'over';
   REPLAY.back = 'over';
+  const prevG = REPLAY.prevG;
+  REPLAY.prevG = null;
   if (back === 'records'){                 // 从记录页点进来的，播完/退出都回记录页
     if (!G.result) G.result = 'lose';
     showScreen('records');
+    return;
+  }
+  if (prevG){                              // 结算页点进来的：把那一局的结算画面还回去
+    G = prevG;
+    G.paused = false;
+    if (!G.result) G.result = 'lose';
+    G.phase = 'over';
     return;
   }
   if (finished){
