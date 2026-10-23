@@ -529,8 +529,9 @@ function shuffleInPlace(a){
   }
   return a;
 }
-/* 从池子里摸走一张指定的字（摸不到返回 false） */
+/* 从池子里摸走一张指定的字（摸不到 / 该字的名将正在场上，返回 false） */
 function takePoolChar(c){
+  if (fieldCharSet()[c]) return false;     // 场上有这个字的名将：不能再摸出第二个
   const i = G.charPool ? G.charPool.indexOf(c) : -1;
   if (i < 0) return false;
   G.charPool.splice(i, 1);
@@ -563,15 +564,25 @@ function refillPool(){
 function drawPoolChar(preferGold){
   let pool = G.charPool || (G.charPool = []);
   if (!pool.length){ refillPool(); pool = G.charPool; }
-  if (!pool.length) return null;
+  /* 场上的字实时排除：名将活着，他的字就摸不出来（重洗只是兜底，
+     光靠重洗不够 —— 池子没摸空时那两个字照样会被抽到）。 */
+  const used = fieldCharSet();
+  let avail = pool.filter(c => !used[c]);
+  if (!avail.length){
+    refillPool(); pool = G.charPool;               // 池里只剩场上的字了：重洗换血
+    avail = pool.filter(c => !used[c]);
+    if (!avail.length) avail = pool;               // 全字都在场上：退回全量保证有牌可发
+  }
   let idx = -1;
   if (preferGold){
     const g = [];
-    for (let i = 0; i < pool.length; i++) if (GOLD_CHARS.indexOf(pool[i]) >= 0) g.push(i);
+    for (let i = 0; i < avail.length; i++) if (GOLD_CHARS.indexOf(avail[i]) >= 0) g.push(i);
     if (g.length) idx = g[(gRnd() * g.length) | 0];
   }
-  if (idx < 0) idx = (gRnd() * pool.length) | 0;
-  return pool.splice(idx, 1)[0];
+  if (idx < 0) idx = (gRnd() * avail.length) | 0;
+  const c = avail[idx];
+  pool.splice(pool.indexOf(c), 1);
+  return c;
 }
 
 /* ---------------- 羁绊 ---------------- */
@@ -1083,7 +1094,12 @@ function sendTileToRoad(owner, tile){
   const cell = pickQueueCell(mine, null);          // 兵营来的：主公前方 1 格起往后排
   if (!cell) return null;
   const m = spawnRaider(mine ? 'me' : 'ai', cell, key, lv);
-  if (m) burst(m.x, m.y, 12, mine ? GOLD : SEAL);
+  if (m){
+    // 战斗中征兵 = 增援，立刻出发赶路（自家半场 2 倍行军）；备战期则排队等开波。
+    // 不立刻放行的话，兵会站满主公前一排直到下一波，下一批征兵的落点被顶得越来越远。
+    if (G.phase === 'battle') deployRaider(m);
+    else burst(m.x, m.y, 12, mine ? GOLD : SEAL);
+  }
   return m;
 }
 /* 旧名字：只送一个「字」上路（别的调用点还在用） */
@@ -1137,7 +1153,7 @@ function enlist(){
   sfx('enlist');
   if (NET.pvp) netPushSide();
   const bits = [];
-  if (r.sent) bits.push(r.sent + ' 张上路人列队');
+  if (r.sent) bits.push(r.sent + ' 张上路增援');
   if (r.refund > 0) bits.push('折 +' + r.refund + ' 馒头');
   toast('征兵 · 刷新 5 格' + (bits.length ? '（' + bits.join(' · ') + '）' : ''));
 }
@@ -1605,18 +1621,23 @@ const OWN_PATH_SPD_CAP = 32;
 function ownPathSpeedMul(m){
   return Math.min(OWN_PATH_SPD_CAP, OWN_PATH_SPD_BASE * Math.pow(2, Math.max(0, m.ri)));
 }
+/* 放行一支待命兵（出队 + 出击特效 + 联机报 raid）。
+   开波统一放行和「战斗中征兵立即增援」都走这里，raid 只在这一处发。 */
+function deployRaider(m){
+  m.queued = false;
+  burst(m.x, m.y, 6, m.owner === 'me' ? GOLD : SEAL);
+  /* 联机：排队期间对面看不到这支兵，真正随军出击才报过去 ——
+     对面收到后在镜像格生成同款兵，那才是这场遭遇战的「权威副本」。 */
+  if (NET.pvp && m.owner === 'me' && m.raider)
+    netSend({ k:'raid', cell:m.originCell, type:m.key, level:m.level, rid:++NET.seq });
+}
 /* 开战：所有待命兵一起放行 */
 function releaseQueue(){
   G.qReleased = true;
   let n = 0;
   for (const m of G.marchers){
     if (!m.queued) continue;
-    m.queued = false; n++;
-    burst(m.x, m.y, 6, m.owner === 'me' ? GOLD : SEAL);
-    /* 联机：排队期间对面看不到这支兵，真正随军出击才报过去 ——
-       对面收到后在镜像格生成同款兵，那才是这场遭遇战的「权威副本」。 */
-    if (NET.pvp && m.owner === 'me' && m.raider)
-      netSend({ k:'raid', cell:m.originCell, type:m.key, level:m.level, rid:++NET.seq });
+    deployRaider(m); n++;
   }
   return n;
 }
