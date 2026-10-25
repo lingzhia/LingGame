@@ -1,3 +1,7 @@
+# agent 记忆 / 编辑器杂项
 .workbuddy/
 .DS_Store
+
+# 对局存档（自对弈 jsonl + 网页录像），体积增长快，不入库
 records/
+wordtower/records/
